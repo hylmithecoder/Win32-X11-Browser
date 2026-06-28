@@ -74,7 +74,7 @@ static void LiveFetchTest() {
   std::cout << "=========================================================="
             << std::endl;
 
-  const std::string url = "https://example.com/";
+  const std::string url = "https://portofolio.ilmeee.com/";
   std::cout << "URL: " << url << std::endl;
 
   std::string response = Net::Get(url);

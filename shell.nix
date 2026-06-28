@@ -22,9 +22,15 @@ if cross then (
       mingwPkgs.openssl
       mingwPkgs.libxml2
       mingwPkgs.libiconv  # libxml2's static archive references iconv symbols
+      pkgs.xorg.libX11
+      pkgs.xorg.libXext
+      pkgs.libGL
+      pkgs.vulkan-headers
     ];
 
     shellHook = ''
+      export LD_LIBRARY_PATH="/run/opengl-driver/lib:/run/opengl-driver-32/lib:${pkgs.xorg.libX11}/lib:${pkgs.xorg.libXext}/lib:${pkgs.libGL}/lib:$LD_LIBRARY_PATH"
+
       echo "=========================================================="
       echo "     DesktopWebview Windows Cross-Compilation Shell      "
       echo "=========================================================="
@@ -68,7 +74,7 @@ if cross then (
       }
 
       run-test-windows() {
-        if [ ! -f build-windows/TestNet.exe ] || [ ! -f build-windows/TestWrapper.exe ]; then
+        if [ ! -f build-windows/TestNet.exe ] || [ ! -f build-windows/TestWrapper.exe ] || [ ! -f build-windows/TestCss.exe ] || [ ! -f build-windows/TestLayout.exe ]; then
           echo "Error: test executables not found in build-windows/. Run build-windows first."
           return 1
         fi
@@ -83,6 +89,18 @@ if cross then (
         echo "Running Windows TestWrapper executable via Wine..."
         echo "=========================================================="
         wine64 build-windows/TestWrapper.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestCss executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestCss.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestLayout executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestLayout.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestPaint executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestPaint.exe || status=$?
         return $status
       }
     '';
@@ -112,11 +130,16 @@ if cross then (
       pkgs.openssl       # Provides the OpenSSL libraries and headers
       pkgs.openssl.dev
       pkgs.libxml2
+      pkgs.vulkan-headers
+      pkgs.vulkan-loader
+      pkgs.vulkan-validation-layers
     ];
 
     shellHook = ''
       ln -sf build-linux/compile_commands.json compile_commands.json
       export PKG_CONFIG_PATH="${pkgs.xorg.libX11.dev}/lib/pkgconfig:${pkgs.xorg.libxcb.dev}/lib/pkgconfig:${pkgs.xorg.libXau.dev}/lib/pkgconfig:${pkgs.xorg.libXdmcp.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
+      export VK_LAYER_PATH="${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d"
+      export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib:${pkgs.lib.makeLibraryPath [ pkgs.libGL ]}:$LD_LIBRARY_PATH"
 
       echo "=========================================================="
       echo "         DesktopWebview Native Linux Development Shell    "
@@ -124,6 +147,7 @@ if cross then (
       echo "Available commands:"
       echo "  1. build-linux   : Configure and build natively for Linux"
       echo "  2. run-linux     : Run the native Linux build"
+      echo "  3. run-test-linux: Run the test executables natively for Linux"
       echo "=========================================================="
 
       build-linux() {
@@ -141,6 +165,39 @@ if cross then (
         else
           echo "Error: build-linux/DesktopWebview not found. Run build-linux first."
         fi
+      }
+
+      run-test-linux() {
+        if [ ! -f build-linux/TestNet ] || [ ! -f build-linux/TestWrapper ] || [ ! -f build-linux/TestCss ]; then
+          echo "Error: test executables not found in build-linux/. Run build-linux first."
+          return 1
+        fi
+        local status=0
+        echo "=========================================================="
+        echo "Running Linux TestNet executable..."
+        echo "=========================================================="
+        ./build-linux/TestNet || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestWrapper executable..."
+        echo "=========================================================="
+        ./build-linux/TestWrapper || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestCss executable..."
+        echo "=========================================================="
+        ./build-linux/TestCss || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestLayout executable..."
+        echo "=========================================================="
+        ./build-linux/TestLayout || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestPaint executable..."
+        echo "=========================================================="
+        ./build-linux/TestPaint || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestWindowPaint executable..."
+        echo "=========================================================="
+        ./build-linux/TestWindowPaint || status=$?
+        return $status
       }
     '';
   }

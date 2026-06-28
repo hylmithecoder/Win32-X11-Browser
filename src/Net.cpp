@@ -51,10 +51,10 @@ namespace {
 // response. All public verbs (Get/Post/Put/Delete) funnel through here so the
 // socket + OpenSSL handshake logic lives in exactly one place. A non-empty
 // body adds Content-Type and Content-Length headers.
-std::string PerformRequest(const std::string &method, const std::string &url,
-                           const std::string &body = "",
-                           const std::string &contentType =
-                               kDefaultContentType) {
+std::string
+PerformRequest(const std::string &method, const std::string &url,
+               const std::string &body = "",
+               const std::string &contentType = kDefaultContentType) {
   std::string host, path, port;
   std::string remaining = url;
 
@@ -151,7 +151,7 @@ std::string PerformRequest(const std::string &method, const std::string &url,
   std::stringstream request;
   request << method << " " << path << " HTTP/1.1\r\n"
           << "Host: " << host << "\r\n"
-          << "User-Agent: CustomCurlOpenSSL/1.0\r\n"
+          << "User-Agent: HylmiBrowser/1.0\r\n"
           << "Accept: */*\r\n";
   if (!body.empty()) {
     request << "Content-Type: " << contentType << "\r\n"
@@ -194,9 +194,7 @@ std::string PerformRequest(const std::string &method, const std::string &url,
 
 } // namespace
 
-std::string Get(const std::string &url) {
-  return PerformRequest("GET", url);
-}
+std::string Get(const std::string &url) { return PerformRequest("GET", url); }
 
 std::string Post(const std::string &url, const std::string &body,
                  const std::string &contentType) {

@@ -1,4 +1,6 @@
 #!/bin/env bash
+nix-shell --arg cross true --run "run-test-windows"
+
 # Copy runtime DLLs in nix-shell first
 nix-shell --arg cross true --run "copy-windows-dlls"
 
@@ -15,5 +17,5 @@ if ! command -v $WINE_CMD &> /dev/null; then
     nix-shell --arg cross true --run "run-windows"
 else
     echo "Running Windows executable via host's $WINE_CMD..."
-    WINEPATH="$(pwd)/build-windows/lib;${WINEPATH:+$WINEPATH}" $WINE_CMD build-windows/DesktopWebview.exe
+    WINEPATH="$(pwd)/build-windows/lib;${WINEPATH:+$WINEPATH}" $WINE_CMD build-windows/TestWindowPaint.exe
 fi
