@@ -119,6 +119,10 @@ if cross then (
         echo "Running Windows TestAudio executable via Wine..."
         echo "=========================================================="
         wine64 build-windows/TestAudio.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestJs executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestJs.exe || status=$?
         return $status
       }
     '';
@@ -233,6 +237,10 @@ if cross then (
         echo "Running Linux TestAudio executable..."
         echo "=========================================================="
         ./build-linux/TestAudio || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestJs executable..."
+        echo "=========================================================="
+        ./build-linux/TestJs || status=$?
         return $status
       }
     '';

@@ -642,10 +642,13 @@ LRESULT BaseWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam,
   case WM_KEYDOWN:
     if (wParam == VK_ESCAPE) {
       DestroyWindow(hwnd);
-    } else if (wParam == VK_LEFT || wParam == VK_RIGHT) {
+    } else if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN) {
       if (m_key) {
         Key e;
-        e.kind = (wParam == VK_LEFT) ? Key::Left : Key::Right;
+        if (wParam == VK_LEFT) e.kind = Key::Left;
+        else if (wParam == VK_RIGHT) e.kind = Key::Right;
+        else if (wParam == VK_UP) e.kind = Key::Up;
+        else if (wParam == VK_DOWN) e.kind = Key::Down;
         if (m_key(e)) {
           InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -687,6 +690,22 @@ LRESULT BaseWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam,
     }
     return 0;
   }
+
+  case WM_MOUSEWHEEL: {
+    if (m_mouse) {
+      int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+      MouseEvent e;
+      e.kind = (delta > 0) ? MouseEvent::ScrollUp : MouseEvent::ScrollDown;
+      if (m_mouse(e)) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+      }
+    }
+    return 0;
+  }
+
+  case WM_TIMER:
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return 0;
 
   case WM_CLOSE:
     DestroyWindow(hwnd);
@@ -731,11 +750,13 @@ void BaseWindow::Run() {
   ShowWindow(hwnd, SW_SHOWNORMAL);
   UpdateWindow(hwnd);
 
+  SetTimer(hwnd, 1, 33, nullptr);
   MSG msg = {};
   while (GetMessage(&msg, nullptr, 0, 0)) {
     TranslateMessage(&msg);
     DispatchMessage(&msg);
   }
+  KillTimer(hwnd, 1);
 }
 
 } // namespace DesktopWebview
@@ -747,6 +768,8 @@ void BaseWindow::Run() {
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include <chrono>
+#include <thread>
 
 namespace DesktopWebview {
 
@@ -805,79 +828,92 @@ void BaseWindow::Run() {
   XEvent event;
 
   while (running) {
-    XNextEvent(display, &event);
-    switch (event.type) {
-    case Expose:
-      if (event.xexpose.count == 0) {
-        Present(RenderContent());
-        painted = true;
-        if (autoClose) {
+    while (XPending(display)) {
+      XNextEvent(display, &event);
+      switch (event.type) {
+      case Expose:
+        if (event.xexpose.count == 0) {
+          Present(RenderContent());
+          if (autoClose) {
+            running = false;
+          }
+        }
+        break;
+
+      case ConfigureNotify: {
+        int nw = event.xconfigure.width;
+        int nh = event.xconfigure.height;
+        if (nw != m_width || nh != m_height) {
+          m_width = nw;
+          m_height = nh;
+        }
+        break;
+      }
+
+      case KeyPress: {
+        char buf[8] = {0};
+        KeySym ks = 0;
+        int n = XLookupString(&event.xkey, buf, sizeof(buf), &ks, nullptr);
+        if (ks == XK_Escape) {
+          running = false;
+        } else if (m_key) {
+          Key e;
+          bool deliver = true;
+          if (ks == XK_Return || ks == XK_KP_Enter) {
+            e.kind = Key::Enter;
+          } else if (ks == XK_BackSpace) {
+            e.kind = Key::Backspace;
+          } else if (ks == XK_Left) {
+            e.kind = Key::Left;
+          } else if (ks == XK_Right) {
+            e.kind = Key::Right;
+          } else if (ks == XK_Up) {
+            e.kind = Key::Up;
+          } else if (ks == XK_Down) {
+            e.kind = Key::Down;
+          } else if (n == 1 && buf[0] >= 32 && buf[0] < 127) {
+            e.kind = Key::Char;
+            e.ch = buf[0];
+          } else {
+            deliver = false;
+          }
+          if (deliver) {
+            m_key(e);
+          }
+        }
+        break;
+      }
+
+      case ButtonPress: {
+        if (m_mouse) {
+          MouseEvent e;
+          if (event.xbutton.button == Button1) {
+            e.kind = MouseEvent::ButtonDown;
+            e.x = event.xbutton.x;
+            e.y = event.xbutton.y;
+            m_mouse(e);
+          } else if (event.xbutton.button == 4) {
+            e.kind = MouseEvent::ScrollUp;
+            m_mouse(e);
+          } else if (event.xbutton.button == 5) {
+            e.kind = MouseEvent::ScrollDown;
+            m_mouse(e);
+          }
+        }
+        break;
+      }
+
+      case ClientMessage:
+        if (static_cast<Atom>(event.xclient.data.l[0]) == wmDelete) {
           running = false;
         }
+        break;
       }
-      break;
-
-    case ConfigureNotify: {
-      int nw = event.xconfigure.width;
-      int nh = event.xconfigure.height;
-      if (nw != m_width || nh != m_height) {
-        m_width = nw;
-        m_height = nh;
-        if (painted) {
-          Present(RenderContent());
-        }
-      }
-      break;
     }
 
-    case KeyPress: {
-      char buf[8] = {0};
-      KeySym ks = 0;
-      int n = XLookupString(&event.xkey, buf, sizeof(buf), &ks, nullptr);
-      if (ks == XK_Escape) {
-        running = false;
-      } else if (m_key) {
-        Key e;
-        bool deliver = true;
-        if (ks == XK_Return || ks == XK_KP_Enter) {
-          e.kind = Key::Enter;
-        } else if (ks == XK_BackSpace) {
-          e.kind = Key::Backspace;
-        } else if (ks == XK_Left) {
-          e.kind = Key::Left;
-        } else if (ks == XK_Right) {
-          e.kind = Key::Right;
-        } else if (n == 1 && buf[0] >= 32 && buf[0] < 127) {
-          e.kind = Key::Char;
-          e.ch = buf[0];
-        } else {
-          deliver = false;
-        }
-        if (deliver && m_key(e)) {
-          Present(RenderContent());
-        }
-      }
-      break;
-    }
-
-    case ButtonPress: {
-      if (event.xbutton.button == Button1 && m_mouse) {
-        MouseEvent e;
-        e.kind = MouseEvent::ButtonDown;
-        e.x = event.xbutton.x;
-        e.y = event.xbutton.y;
-        if (m_mouse(e)) {
-          Present(RenderContent());
-        }
-      }
-      break;
-    }
-
-    case ClientMessage:
-      if (static_cast<Atom>(event.xclient.data.l[0]) == wmDelete) {
-        running = false;
-      }
-      break;
+    if (running) {
+      Present(RenderContent());
+      std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
   }
 }

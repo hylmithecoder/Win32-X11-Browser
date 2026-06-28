@@ -73,6 +73,10 @@ target_include_directories(TestFont PRIVATE include)
 add_executable(TestBrowser test/test_browser.cpp ${TEST_SRCS} ${HEADERS})
 target_include_directories(TestBrowser PRIVATE include)
 
+# JS Engine Test Target
+add_executable(TestJs test/test_js.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestJs PRIVATE include)
+
 # Audio Test Target (ALSA/WASAPI PCM). Audio.cpp is filtered out of TEST_SRCS,
 # so add it back here explicitly; only this target and the app need the backend.
 add_executable(TestAudio test/test_audio.cpp ${TEST_SRCS} src/Audio.cpp ${HEADERS})
@@ -86,7 +90,7 @@ target_include_directories(TestWindowPaint PRIVATE include)
 
 # libxml2 is required by every target (the wrapper is part of the shared
 # sources). Apply its include dirs and libraries uniformly.
-foreach(_target ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestAudio TestWindowPaint)
+foreach(_target ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestAudio TestWindowPaint TestJs)
     target_include_directories(${_target} PRIVATE ${LIBXML2_INCLUDE_DIRS})
     target_link_libraries(${_target} PRIVATE ${LIBXML2_LIBRARIES})
     target_compile_options(${_target} PRIVATE ${LIBXML2_CFLAGS_OTHER})
@@ -118,7 +122,7 @@ if(WIN32)
     endforeach()
 
     # Links for the plain test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser)
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs)
         target_link_libraries(${_target} PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32)
         target_link_options(${_target} PRIVATE ${WIN_LINK_OPTIONS})
     endforeach()
@@ -141,7 +145,7 @@ else()
     endforeach()
 
     # Links for the plain test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser)
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs)
         target_include_directories(${_target} PRIVATE ${OpenSSL_INCLUDE_DIRS})
         target_link_libraries(${_target} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     endforeach()

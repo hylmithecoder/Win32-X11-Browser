@@ -41,6 +41,9 @@ public:
   // with markup stripped (libxml2's xmlNodeGetContent).
   std::string text() const;
 
+  // Set the text content of this node (libxml2's xmlNodeSetContent).
+  void setText(const std::string &content);
+
   // The value of an attribute (e.g. attribute("href")), or an empty string
   // when the attribute is absent.
   std::string attribute(const std::string &name) const;
@@ -85,9 +88,9 @@ public:
   HtmlDocument(HtmlDocument &&other) noexcept;
   HtmlDocument &operator=(HtmlDocument &&other) noexcept;
 
-  // Parse an HTML string. `html` may be a full document or a fragment; `baseUrl`
-  // is used by libxml2 only for diagnostics and relative-URL context. Replaces
-  // any previously parsed document. Returns false on failure.
+  // Parse an HTML string. `html` may be a full document or a fragment;
+  // `baseUrl` is used by libxml2 only for diagnostics and relative-URL context.
+  // Replaces any previously parsed document. Returns false on failure.
   bool parse(const std::string &html, const std::string &baseUrl = "");
 
   // Convenience: strip the HTTP status line/headers off a raw Net response

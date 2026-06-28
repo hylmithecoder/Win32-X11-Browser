@@ -36,7 +36,7 @@ public:
 
   // A keyboard event delivered to the application (e.g. the address bar).
   struct Key {
-    enum Kind { Char, Backspace, Enter, Left, Right };
+    enum Kind { Char, Backspace, Enter, Left, Right, Up, Down };
     Kind kind = Char;
     char ch = 0;
   };
@@ -46,7 +46,7 @@ public:
 
   // A mouse event delivered to the application (e.g. for link clicking).
   struct MouseEvent {
-    enum Kind { ButtonDown, ButtonUp };
+    enum Kind { ButtonDown, ButtonUp, ScrollUp, ScrollDown };
     Kind kind = ButtonDown;
     int x = 0;
     int y = 0;

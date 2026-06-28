@@ -34,6 +34,18 @@ int main(int argc, char **argv) {
     case BaseWindow::Key::Enter:
       in.kind = Browser::KeyInput::Enter;
       break;
+    case BaseWindow::Key::Left:
+      in.kind = Browser::KeyInput::Left;
+      break;
+    case BaseWindow::Key::Right:
+      in.kind = Browser::KeyInput::Right;
+      break;
+    case BaseWindow::Key::Up:
+      in.kind = Browser::KeyInput::Up;
+      break;
+    case BaseWindow::Key::Down:
+      in.kind = Browser::KeyInput::Down;
+      break;
     }
     return browser.handleKey(in);
   });
@@ -41,6 +53,10 @@ int main(int argc, char **argv) {
   window.SetMouseCallback([&browser](const BaseWindow::MouseEvent &m) {
     if (m.kind == BaseWindow::MouseEvent::ButtonDown) {
       return browser.handleClick(m.x, m.y);
+    } else if (m.kind == BaseWindow::MouseEvent::ScrollUp) {
+      return browser.handleScroll(-40);
+    } else if (m.kind == BaseWindow::MouseEvent::ScrollDown) {
+      return browser.handleScroll(40);
     }
     return false;
   });

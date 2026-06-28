@@ -1,5 +1,6 @@
 #include "../include/Browser.hpp"
 #include "../include/Font.hpp"
+#include "../include/JsEngine.hpp"
 #include "../include/Net.hpp"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 
 namespace DesktopWebview {
@@ -240,6 +242,7 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     return false;
   }
   m_currentUrl = baseUrl;
+  m_scrollY = 0.0f;
   if (baseUrl.rfind("http://", 0) == 0) {
     m_urlText = baseUrl.substr(7);
   } else {
@@ -292,10 +295,61 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   preload("src", "img");
   preload("poster", "video");
 
+  m_videos.clear();
+  for (const Wrapper::Node &el : m_doc.getElementsByTagName("video")) {
+    std::string src = el.attribute("src");
+    if (src.empty()) {
+      continue;
+    }
+    std::string abs = resolveUrl(src);
+    if (m_videos.count(abs)) {
+      continue;
+    }
+    if (abs.size() >= 5 && abs.substr(abs.size() - 5) == ".rawv") {
+      auto fvs = std::make_unique<Video::FileVideoSource>(abs);
+      if (fvs->valid()) {
+        m_videos[abs] = std::move(fvs);
+      } else {
+        m_videos[abs] =
+            std::make_unique<Video::SyntheticVideoSource>(320, 240, 30.0, 300);
+      }
+    } else {
+      m_videos[abs] =
+          std::make_unique<Video::SyntheticVideoSource>(320, 240, 30.0, 300);
+    }
+  }
+
+  m_startTime = std::chrono::steady_clock::now();
+
   annotateSizes(m_style);
 
   m_hasDoc = true;
   m_status.clear();
+
+  // Run script tags with custom JsEngine
+  Js::DomInterface dom;
+  dom.setTitle = [&](const std::string &title) {
+    m_title = title;
+    std::cout << "[JS] Document title set to: " << title << std::endl;
+  };
+  dom.setElementText = [&](const std::string &id, const std::string &text) {
+    Wrapper::Node el = m_doc.getElementById(id);
+    if (el) {
+      el.setText(text);
+      m_style = Layout::styleTree(m_doc.root(), m_sheet);
+      annotateSizes(m_style);
+    }
+  };
+  dom.getElementText = [&](const std::string &id) -> std::string {
+    Wrapper::Node el = m_doc.getElementById(id);
+    return el ? el.text() : "";
+  };
+
+  Js::JsEngine engine(dom);
+  for (const Wrapper::Node &script : m_doc.getElementsByTagName("script")) {
+    engine.execute(script.text());
+  }
+
   return true;
 }
 
@@ -380,20 +434,38 @@ void Browser::compositeContent(Paint::Canvas &canvas,
       }
     } else if (name == "video") {
       bool drew = false;
-      std::string poster = el.attribute("poster");
-      if (!poster.empty()) {
-        auto it = m_images.find(resolveUrl(poster));
-        if (it != m_images.end() && it->second.valid()) {
-          BlitScaled(canvas, it->second, c);
-          drew = true;
+      std::string src = el.attribute("src");
+      if (!src.empty()) {
+        std::string absSrc = resolveUrl(src);
+        auto vit = m_videos.find(absSrc);
+        if (vit != m_videos.end() && vit->second) {
+          double elapsed = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - m_startTime)
+                               .count();
+          int index = Video::frameIndexForTime(*vit->second, elapsed);
+          Image::Bitmap frame;
+          if (vit->second->frameAt(index, frame)) {
+            BlitScaled(canvas, frame, c);
+            drew = true;
+          }
+        }
+      }
+      if (!drew) {
+        std::string poster = el.attribute("poster");
+        if (!poster.empty()) {
+          auto it = m_images.find(resolveUrl(poster));
+          if (it != m_images.end() && it->second.valid()) {
+            BlitScaled(canvas, it->second, c);
+            drew = true;
+          }
         }
       }
       if (!drew) {
         FillRect(canvas, static_cast<int>(c.x), static_cast<int>(c.y),
                  static_cast<int>(c.width), static_cast<int>(c.height),
                  Paint::Color{0x20, 0x20, 0x20, 255});
+        DrawPlayTriangle(canvas, c, kWhite);
       }
-      DrawPlayTriangle(canvas, c, kWhite);
     } else if (box.children.empty()) {
       std::string text = CollapseWhitespace(el.text());
       if (!text.empty()) {
@@ -479,11 +551,41 @@ Paint::Canvas Browser::render(int width, int height) {
   Paint::Canvas canvas(width, height);
   canvas.clear(kWhite);
 
-  int pageH = std::max(1, height - kChromeHeight);
-  Paint::Canvas page = renderPage(width, pageH);
-  for (int y = 0; y < pageH; ++y) {
-    for (int x = 0; x < width; ++x) {
-      canvas.blendPixel(x, y + kChromeHeight, page.at(x, y));
+  int pageViewportH = std::max(1, height - kChromeHeight);
+
+  if (!m_hasDoc) {
+    Font::drawText(canvas, 8, kChromeHeight + 8,
+                   m_status.empty() ? "No page loaded" : m_status, kBlack, 18);
+    drawChrome(canvas, width);
+    return canvas;
+  }
+
+  // 1. Run layout with viewport width to determine content height
+  Layout::LayoutBox box = Layout::layout(
+      m_style, static_cast<float>(width), static_cast<float>(pageViewportH));
+  float contentH = box.dimensions.marginBox().height;
+  int pageCanvasH = std::max(pageViewportH, static_cast<int>(std::ceil(contentH)));
+
+  // 2. Render the full page canvas
+  Paint::Canvas page = renderPage(width, pageCanvasH);
+
+  // 3. Clamp scroll offset
+  int maxScrollY = std::max(0, pageCanvasH - pageViewportH);
+  if (m_scrollY < 0.0f) {
+    m_scrollY = 0.0f;
+  }
+  if (m_scrollY > maxScrollY) {
+    m_scrollY = static_cast<float>(maxScrollY);
+  }
+
+  // 4. Copy the scrolled viewport slice onto canvas
+  int startY = static_cast<int>(m_scrollY);
+  for (int y = 0; y < pageViewportH; ++y) {
+    int srcY = startY + y;
+    if (srcY >= 0 && srcY < pageCanvasH) {
+      for (int x = 0; x < width; ++x) {
+        canvas.blendPixel(x, y + kChromeHeight, page.at(x, srcY));
+      }
     }
   }
 
@@ -532,7 +634,7 @@ bool Browser::handleClick(int x, int y) {
       m_style, static_cast<float>(m_lastWidth), static_cast<float>(pageH));
 
   float px = static_cast<float>(x);
-  float py = static_cast<float>(y - kChromeHeight);
+  float py = static_cast<float>(y - kChromeHeight) + m_scrollY;
 
   const Layout::LayoutBox *found = FindBoxAt(box, px, py);
   if (found && found->node) {
@@ -588,8 +690,24 @@ bool Browser::handleKey(const KeyInput &key) {
   case KeyInput::Enter:
     navigate(m_urlText);
     return true;
+
+  case KeyInput::Up:
+    m_scrollY = std::max(0.0f, m_scrollY - 30.0f);
+    return true;
+
+  case KeyInput::Down:
+    m_scrollY += 30.0f;
+    return true;
   }
   return false;
+}
+
+bool Browser::handleScroll(int delta) {
+  m_scrollY += delta;
+  if (m_scrollY < 0.0f) {
+    m_scrollY = 0.0f;
+  }
+  return true;
 }
 
 } // namespace Browser

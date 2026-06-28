@@ -7,7 +7,10 @@
 #include "Paint.hpp"
 #include "Wrapper.hpp"
 
+#include "Video.hpp"
+#include <chrono>
 #include <map>
+#include <memory>
 #include <string>
 
 namespace DesktopWebview {
@@ -15,7 +18,7 @@ namespace Browser {
 
 // A key event delivered to the address bar.
 struct KeyInput {
-  enum Kind { Char, Backspace, Enter, Left, Right };
+  enum Kind { Char, Backspace, Enter, Left, Right, Up, Down };
   Kind kind = Char;
   char ch = 0;
 };
@@ -47,6 +50,10 @@ public:
   // view should be repainted (e.g. if navigation was triggered).
   bool handleClick(int x, int y);
 
+  // Handle a scroll event with the given pixel delta. Returns true if the
+  // view should be repainted.
+  bool handleScroll(int delta);
+
   // Render chrome + page into a fresh canvas of the given size.
   Paint::Canvas render(int width, int height);
 
@@ -75,6 +82,7 @@ private:
   std::string m_urlText;    // editable address-bar contents
   std::string m_currentUrl; // last successfully loaded URL (also the base)
   std::string m_status;     // status / error line shown when no page
+  std::string m_title;      // document title set by JS or parsed
 
   bool m_hasDoc = false;
   Wrapper::HtmlDocument m_doc;
@@ -84,10 +92,17 @@ private:
   // Decoded resources keyed by absolute URL.
   std::map<std::string, Image::Bitmap> m_images;
 
+  // Decoded videos keyed by absolute URL.
+  std::map<std::string, std::unique_ptr<Video::VideoSource>> m_videos;
+
+  // High-resolution clock start time for video playback.
+  std::chrono::steady_clock::time_point m_startTime;
+
   // Last rendered dimensions used for mapping click coordinates back to page
   // layout space.
   int m_lastWidth = 1024;
   int m_lastHeight = 720;
+  float m_scrollY = 0.0f;
 
   // Text cursor position inside the address bar (m_urlText).
   size_t m_cursorPos = 0;

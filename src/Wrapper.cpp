@@ -118,6 +118,12 @@ std::string Node::text() const {
   return TakeXmlString(xmlNodeGetContent(m_node));
 }
 
+void Node::setText(const std::string &content) {
+  if (m_node != nullptr) {
+    xmlNodeSetContent(m_node, reinterpret_cast<const xmlChar *>(content.c_str()));
+  }
+}
+
 std::string Node::attribute(const std::string &name) const {
   if (!isElement()) {
     return "";
