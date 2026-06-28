@@ -1,0 +1,1 @@
+nix-shell --arg cross true --run "run-test-windows"
