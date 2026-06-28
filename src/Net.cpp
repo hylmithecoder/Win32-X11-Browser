@@ -9,7 +9,9 @@ typedef SOCKET SocketType;
 #define INVALID_SOCKET_VAL INVALID_SOCKET
 #else
 #include <arpa/inet.h>
+#include <cstring>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int SocketType;
@@ -17,10 +19,13 @@ typedef int SocketType;
 #define INVALID_SOCKET_VAL -1
 #endif
 
+#include <cstdint>
 #include <iostream>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <random>
 #include <sstream>
+#include <vector>
 
 namespace DesktopWebview {
 namespace Net {
@@ -46,6 +51,183 @@ void Cleanup() {
 }
 
 namespace {
+
+// Build a DNS query packet for an A record lookup of the given hostname.
+// Returns the raw packet bytes suitable for sending over UDP.
+std::vector<uint8_t> BuildDnsQuery(const std::string &hostname) {
+  std::vector<uint8_t> packet;
+
+  // DNS Header (12 bytes)
+  uint16_t id = 0;
+  { // random transaction ID
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint16_t> dist(0);
+    id = dist(gen);
+  }
+  auto write16 = [&](uint16_t v) {
+    packet.push_back(static_cast<uint8_t>(v >> 8));
+    packet.push_back(static_cast<uint8_t>(v & 0xFF));
+  };
+
+  write16(id);     // Transaction ID
+  write16(0x0100); // Flags: standard query, recursion desired
+  write16(1);      // QDCOUNT: 1 question
+  write16(0);      // ANCOUNT: 0
+  write16(0);      // NSCOUNT: 0
+  write16(0);      // ARCOUNT: 0
+
+  // Question: QNAME (encoded hostname)
+  size_t start = 0;
+  for (size_t i = 0; i <= hostname.size(); ++i) {
+    if (i == hostname.size() || hostname[i] == '.') {
+      uint8_t len = static_cast<uint8_t>(i - start);
+      packet.push_back(len);
+      for (size_t j = start; j < i; ++j) {
+        packet.push_back(static_cast<uint8_t>(hostname[j]));
+      }
+      start = i + 1;
+    }
+  }
+  packet.push_back(0); // terminating zero-length label
+
+  write16(1); // QTYPE: A record
+  write16(1); // QCLASS: IN (Internet)
+
+  return packet;
+}
+
+// Parse a DNS response and return the first A-record IP as a string
+// (dotted decimal), or empty on failure.
+std::string ParseDnsResponse(const std::vector<uint8_t> &response) {
+  if (response.size() < 12)
+    return "";
+
+  // Check flags: response code must be 0
+  uint16_t flags = static_cast<uint16_t>(response[2] << 8) | response[3];
+  if ((flags & 0x000F) != 0)
+    return "";
+
+  uint16_t qdcount = static_cast<uint16_t>(response[4] << 8) | response[5];
+  uint16_t ancount = static_cast<uint16_t>(response[6] << 8) | response[7];
+
+  if (ancount == 0)
+    return "";
+
+  size_t pos = 12;
+
+  // Skip the question section
+  for (uint16_t q = 0; q < qdcount; ++q) {
+    while (pos < response.size()) {
+      uint8_t len = response[pos];
+      if (len == 0) {
+        ++pos;
+        break;
+      }
+      if ((len & 0xC0) == 0xC0) {
+        pos += 2;
+        break;
+      } // compressed label
+      pos += len + 1;
+    }
+    pos += 4; // skip QTYPE + QCLASS
+    if (pos > response.size())
+      return "";
+  }
+
+  // Parse answer section
+  for (uint16_t a = 0; a < ancount; ++a) {
+    // NAME
+    if (pos >= response.size())
+      return "";
+    if ((response[pos] & 0xC0) == 0xC0) {
+      pos += 2; // compressed name pointer
+    } else {
+      while (pos < response.size()) {
+        uint8_t len = response[pos];
+        if (len == 0) {
+          ++pos;
+          break;
+        }
+        if ((len & 0xC0) == 0xC0) {
+          pos += 2;
+          break;
+        }
+        pos += len + 1;
+      }
+    }
+    if (pos + 10 > response.size())
+      return "";
+
+    uint16_t type =
+        static_cast<uint16_t>(response[pos] << 8) | response[pos + 1];
+    pos += 2;
+    pos += 2; // skip CLASS
+    pos += 4; // skip TTL
+    uint16_t rdlength =
+        static_cast<uint16_t>(response[pos] << 8) | response[pos + 1];
+    pos += 2;
+
+    if (type == 1 && rdlength == 4 && pos + 4 <= response.size()) {
+      // A record: 4-byte IPv4 address
+      char ip[16];
+      std::snprintf(ip, sizeof(ip), "%d.%d.%d.%d", response[pos],
+                    response[pos + 1], response[pos + 2], response[pos + 3]);
+      return std::string(ip);
+    }
+    pos += rdlength;
+  }
+
+  return "";
+}
+
+// Resolve a hostname to an IP address string via kDnsServer using raw DNS.
+std::string ResolveHostname(const std::string &hostname) {
+  std::vector<uint8_t> query = BuildDnsQuery(hostname);
+
+  SocketType sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock == INVALID_SOCKET_VAL)
+    return "";
+
+  struct sockaddr_in dns_addr = {};
+  dns_addr.sin_family = AF_INET;
+  dns_addr.sin_port = htons(static_cast<uint16_t>(std::stoi(kDnsPort)));
+  if (inet_pton(AF_INET, kDnsServer, &dns_addr.sin_addr) != 1) {
+    CLOSE_SOCKET(sock);
+    return "";
+  }
+
+  if (sendto(sock, reinterpret_cast<const char *>(query.data()), query.size(),
+             0, reinterpret_cast<struct sockaddr *>(&dns_addr),
+             sizeof(dns_addr)) < 0) {
+    CLOSE_SOCKET(sock);
+    return "";
+  }
+
+  // Set receive timeout (3 seconds)
+#if defined(_WIN32)
+  DWORD timeout = 3000;
+#else
+  struct timeval timeout = {};
+  timeout.tv_sec = 3;
+#endif
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+
+  std::vector<uint8_t> response(512);
+  struct sockaddr_in from = {};
+  socklen_t fromlen = sizeof(from);
+  int n = static_cast<int>(
+      recvfrom(sock, reinterpret_cast<char *>(response.data()), response.size(),
+               0, reinterpret_cast<struct sockaddr *>(&from), &fromlen));
+  CLOSE_SOCKET(sock);
+
+  if (n <= 0)
+    return "";
+  response.resize(static_cast<size_t>(n));
+
+  return ParseDnsResponse(response);
+}
 
 // Perform a single HTTP request over a fresh TLS connection and return the raw
 // response. All public verbs (Get/Post/Put/Delete) funnel through here so the
@@ -82,31 +264,51 @@ PerformRequest(const std::string &method, const std::string &url,
     host = host.substr(0, colon_pos);
   }
 
-  // Resolve hostname to IP address
-  struct addrinfo hints = {}, *res = nullptr;
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-
-  if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) {
-    std::cerr << "Failed to resolve hostname: " << host << std::endl;
-    return "";
-  }
-
+  // Resolve hostname via kDnsServer (1.1.1.1)
+  std::string ip = ResolveHostname(host);
   SocketType sock = INVALID_SOCKET_VAL;
-  struct addrinfo *p = nullptr;
-  for (p = res; p != nullptr; p = p->ai_next) {
-    sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-    if (sock == INVALID_SOCKET_VAL)
-      continue;
 
-    if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) {
-      break; // Successfully connected
+  if (!ip.empty()) {
+    // Custom DNS resolution succeeded: connect directly via IPv4
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(std::stoi(port)));
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) == 1) {
+      sock = socket(AF_INET, SOCK_STREAM, 0);
+      if (sock != INVALID_SOCKET_VAL) {
+        if (connect(sock, reinterpret_cast<struct sockaddr *>(&addr),
+                    sizeof(addr)) != 0) {
+          CLOSE_SOCKET(sock);
+          sock = INVALID_SOCKET_VAL;
+        }
+      }
     }
-    CLOSE_SOCKET(sock);
-    sock = INVALID_SOCKET_VAL;
   }
 
-  freeaddrinfo(res);
+  if (sock == INVALID_SOCKET_VAL) {
+    // Fallback: use system resolver
+    struct addrinfo hints = {}, *res = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) {
+      std::cerr << "Failed to resolve hostname: " << host << std::endl;
+      return "";
+    }
+    for (struct addrinfo *p = res; p != nullptr; p = p->ai_next) {
+      sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+      if (sock == INVALID_SOCKET_VAL)
+        continue;
+      if (connect(sock, p->ai_addr, p->ai_addrlen) == 0)
+        break;
+      CLOSE_SOCKET(sock);
+      sock = INVALID_SOCKET_VAL;
+    }
+    freeaddrinfo(res);
+    if (sock == INVALID_SOCKET_VAL) {
+      std::cerr << "Failed to connect to host: " << host << std::endl;
+      return "";
+    }
+  }
 
   if (sock == INVALID_SOCKET_VAL) {
     std::cerr << "Failed to connect to host: " << host << std::endl;

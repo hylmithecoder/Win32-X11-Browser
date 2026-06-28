@@ -12,6 +12,12 @@ void Init();
 // Cleanup libraries
 void Cleanup();
 
+// DNS server used for hostname resolution (Cloudflare 1.1.1.1).
+inline constexpr const char *kDnsServer = "1.1.1.1";
+
+// DNS server port.
+inline constexpr const char *kDnsPort = "53";
+
 // Default media type used for request bodies when none is supplied.
 inline constexpr const char *kDefaultContentType =
     "application/x-www-form-urlencoded";

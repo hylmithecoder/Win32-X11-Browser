@@ -12,9 +12,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Find OpenSSL (required for both platforms)
 find_package(OpenSSL REQUIRED)
 
-# Find Vulkan (required for both platforms)
-find_package(Vulkan REQUIRED)
-
 # Find libxml2 (HTML parsing for the page wrapper)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBXML2 REQUIRED libxml-2.0)
@@ -27,9 +24,10 @@ file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include
 add_executable(${PROJECT_NAME} ${SRCS} ${HEADERS})
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 
-# Create a source list for tests (exclude main.cpp and BaseWindow.cpp)
+# Create a source list for tests. Exclude main.cpp, BaseWindow.cpp (window/
+# Vulkan), and Audio.cpp (ALSA/WASAPI) so plain tests need no audio backend.
 set(TEST_SRCS ${SRCS})
-list(FILTER TEST_SRCS EXCLUDE REGEX "src/main.cpp$|src/BaseWindow.cpp$")
+list(FILTER TEST_SRCS EXCLUDE REGEX "src/main.cpp$|src/BaseWindow.cpp$|src/Audio.cpp$")
 
 # Net Test Target
 add_executable(TestNet test/test_net.cpp ${TEST_SRCS} ${HEADERS})
@@ -51,6 +49,23 @@ target_include_directories(TestLayout PRIVATE include)
 add_executable(TestPaint test/test_paint.cpp ${TEST_SRCS} ${HEADERS})
 target_include_directories(TestPaint PRIVATE include)
 
+# Image Test Target (BMP/PPM decode + blit)
+add_executable(TestImage test/test_image.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestImage PRIVATE include)
+
+# SVG Test Target (libxml2 parse + Canvas rasteriser)
+add_executable(TestSvg test/test_svg.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestSvg PRIVATE include)
+
+# Video Test Target (frame source + timing)
+add_executable(TestVideo test/test_video.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestVideo PRIVATE include)
+
+# Audio Test Target (ALSA/WASAPI PCM). Audio.cpp is filtered out of TEST_SRCS,
+# so add it back here explicitly; only this target and the app need the backend.
+add_executable(TestAudio test/test_audio.cpp ${TEST_SRCS} src/Audio.cpp ${HEADERS})
+target_include_directories(TestAudio PRIVATE include)
+
 # WindowPaint Test Target (Window + Paint + Layout + Css + Wrapper)
 # Needs BaseWindow.cpp explicitly (it is filtered out of TEST_SRCS)
 set(TestWindowPaint_SRCS ${TEST_SRCS} src/BaseWindow.cpp)
@@ -59,7 +74,7 @@ target_include_directories(TestWindowPaint PRIVATE include)
 
 # libxml2 is required by every target (the wrapper is part of the shared
 # sources). Apply its include dirs and libraries uniformly.
-foreach(_target ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestWindowPaint)
+foreach(_target ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestAudio TestWindowPaint)
     target_include_directories(${_target} PRIVATE ${LIBXML2_INCLUDE_DIRS})
     target_link_libraries(${_target} PRIVATE ${LIBXML2_LIBRARIES})
     target_compile_options(${_target} PRIVATE ${LIBXML2_CFLAGS_OTHER})
@@ -81,31 +96,45 @@ if(WIN32)
     # their DLLs are copied next to the executable at run time (see shell.nix).
     set(WIN_LINK_OPTIONS -static-libgcc -static-libstdc++)
 
-    # Links for main application and TestWindowPaint
+    set(Vulkan_LIBRARIES vulkan-1)
+
+    # Links for main application and TestWindowPaint (Vulkan; the app also pulls
+    # in Audio.cpp, so it needs ole32 for WASAPI).
     foreach(_targetDesktop ${PROJECT_NAME} TestWindowPaint)
-        target_link_libraries(${_targetDesktop} PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32 Vulkan::Vulkan)
+        target_link_libraries(${_targetDesktop} PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32 ${Vulkan_LIBRARIES} ole32)
         target_link_options(${_targetDesktop} PRIVATE ${WIN_LINK_OPTIONS})
     endforeach()
 
-    # Links for the test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint)
+    # Links for the plain test targets
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo)
         target_link_libraries(${_target} PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32)
         target_link_options(${_target} PRIVATE ${WIN_LINK_OPTIONS})
     endforeach()
+
+    # Audio test: WASAPI needs ole32.
+    target_link_libraries(TestAudio PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32 ole32)
+    target_link_options(TestAudio PRIVATE ${WIN_LINK_OPTIONS})
 else()
     # Linux native build using X11
     message(STATUS "Building for Linux/X11 Target...")
+    find_package(Vulkan REQUIRED)
     pkg_check_modules(X11 REQUIRED x11)
+    pkg_check_modules(ALSA REQUIRED alsa)
 
-    # Links for main application and TestWindowPaint
+    # Links for main application and TestWindowPaint. The app includes Audio.cpp,
+    # so it links the ALSA backend.
     foreach(_targetDesktop ${PROJECT_NAME} TestWindowPaint)
-        target_include_directories(${_targetDesktop} PRIVATE ${OpenSSL_INCLUDE_DIRS} ${X11_INCLUDE_DIRS})
-        target_link_libraries(${_targetDesktop} PRIVATE ${X11_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto Vulkan::Vulkan)
+        target_include_directories(${_targetDesktop} PRIVATE ${OpenSSL_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${ALSA_INCLUDE_DIRS})
+        target_link_libraries(${_targetDesktop} PRIVATE ${X11_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto Vulkan::Vulkan ${ALSA_LIBRARIES})
     endforeach()
 
-    # Links for the test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint)
+    # Links for the plain test targets
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo)
         target_include_directories(${_target} PRIVATE ${OpenSSL_INCLUDE_DIRS})
         target_link_libraries(${_target} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     endforeach()
+
+    # Audio test: ALSA backend.
+    target_include_directories(TestAudio PRIVATE ${OpenSSL_INCLUDE_DIRS} ${ALSA_INCLUDE_DIRS})
+    target_link_libraries(TestAudio PRIVATE OpenSSL::SSL OpenSSL::Crypto ${ALSA_LIBRARIES})
 endif()

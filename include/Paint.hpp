@@ -64,6 +64,10 @@ public:
   // to the nearest pixel; the rect is clipped to the canvas bounds.
   void fillRect(const Layout::Rect &rect, Color color);
 
+  // Alpha-blend `color` over a single pixel (clipped to bounds). The primitive
+  // used by image blitting and SVG/shape rasterisation.
+  void blendPixel(int x, int y, Color color);
+
   // Colour at (x, y); returns transparent black for out-of-bounds reads.
   Color at(int x, int y) const;
 

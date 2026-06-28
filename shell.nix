@@ -22,6 +22,7 @@ if cross then (
       mingwPkgs.openssl
       mingwPkgs.libxml2
       mingwPkgs.libiconv  # libxml2's static archive references iconv symbols
+      mingwPkgs.vulkan-loader
       pkgs.xorg.libX11
       pkgs.xorg.libXext
       pkgs.libGL
@@ -57,10 +58,11 @@ if cross then (
       # even with -static-libgcc/-static-libstdc++.
       copy-windows-dlls() {
         mkdir -p build-windows/lib
-        echo "Copying runtime DLLs (OpenSSL + iconv + mcfgthread) to build-windows/lib/..."
+        echo "Copying runtime DLLs (OpenSSL + iconv + mcfgthread + Vulkan) to build-windows/lib/..."
         cp -f ${mingwPkgs.openssl}/bin/*.dll build-windows/lib/
         cp -f ${mingwPkgs.libiconv}/bin/*.dll build-windows/lib/
         cp -f ${mingwPkgs.windows.mcfgthreads}/bin/*.dll build-windows/lib/
+        cp -f ${mingwPkgs.vulkan-loader}/bin/*.dll build-windows/lib/
       }
 
       run-windows() {
@@ -101,6 +103,22 @@ if cross then (
         echo "Running Windows TestPaint executable via Wine..."
         echo "=========================================================="
         wine64 build-windows/TestPaint.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestImage executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestImage.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestSvg executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestSvg.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestVideo executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestVideo.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestAudio executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestAudio.exe || status=$?
         return $status
       }
     '';
@@ -133,6 +151,8 @@ if cross then (
       pkgs.vulkan-headers
       pkgs.vulkan-loader
       pkgs.vulkan-validation-layers
+      pkgs.alsa-lib       # ALSA audio output backend (libasound)
+      pkgs.alsa-lib.dev
     ];
 
     shellHook = ''
@@ -197,6 +217,22 @@ if cross then (
         echo "Running Linux TestWindowPaint executable..."
         echo "=========================================================="
         ./build-linux/TestWindowPaint || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestImage executable..."
+        echo "=========================================================="
+        ./build-linux/TestImage || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestSvg executable..."
+        echo "=========================================================="
+        ./build-linux/TestSvg || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestVideo executable..."
+        echo "=========================================================="
+        ./build-linux/TestVideo || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestAudio executable..."
+        echo "=========================================================="
+        ./build-linux/TestAudio || status=$?
         return $status
       }
     '';

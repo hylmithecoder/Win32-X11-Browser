@@ -319,6 +319,14 @@ void Canvas::fillRect(const Layout::Rect &rect, Color color) {
   }
 }
 
+void Canvas::blendPixel(int x, int y, Color color) {
+  if (x < 0 || y < 0 || x >= m_width || y >= m_height) {
+    return;
+  }
+  Color &dst = m_pixels[static_cast<size_t>(y) * m_width + x];
+  dst = BlendOver(dst, color);
+}
+
 void Canvas::paint(const DisplayList &list) {
   for (const DisplayCommand &cmd : list) {
     switch (cmd.type) {
