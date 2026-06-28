@@ -240,6 +240,7 @@ PerformRequest(const std::string &method, const std::string &url,
   std::string host, path, port;
   std::string remaining = url;
 
+  bool isHttps = true;
   port = "443"; // Default to HTTPS port
 
   if (remaining.rfind("https://", 0) == 0) {
@@ -247,6 +248,7 @@ PerformRequest(const std::string &method, const std::string &url,
   } else if (remaining.rfind("http://", 0) == 0) {
     remaining = remaining.substr(7);
     port = "80";
+    isHttps = false;
   }
 
   size_t path_pos = remaining.find('/');
@@ -315,6 +317,50 @@ PerformRequest(const std::string &method, const std::string &url,
     return "";
   }
 
+  // Form the HTTP request line + headers (+ optional body). Identical for the
+  // plain-HTTP and HTTPS paths.
+  std::stringstream request;
+  request << method << " " << path << " HTTP/1.1\r\n"
+          << "Host: " << host << "\r\n"
+          << "User-Agent: HylmiBrowser/1.0\r\n"
+          << "Accept: */*\r\n";
+  if (!body.empty()) {
+    request << "Content-Type: " << contentType << "\r\n"
+            << "Content-Length: " << body.size() << "\r\n";
+  }
+  request << "Connection: close\r\n\r\n";
+  if (!body.empty()) {
+    request << body;
+  }
+  std::string req_str = request.str();
+
+  // Plain HTTP (e.g. http://localhost): send/recv over the raw socket, no TLS.
+  if (!isHttps) {
+    std::string response;
+    size_t total = 0;
+    while (total < req_str.size()) {
+      int n = static_cast<int>(send(sock, req_str.data() + total,
+                                    static_cast<int>(req_str.size() - total),
+                                    0));
+      if (n <= 0) {
+        std::cerr << "Failed to send HTTP request." << std::endl;
+        CLOSE_SOCKET(sock);
+        return "";
+      }
+      total += static_cast<size_t>(n);
+    }
+    char rbuf[4096];
+    int bytes = 0;
+    do {
+      bytes = static_cast<int>(recv(sock, rbuf, sizeof(rbuf), 0));
+      if (bytes > 0) {
+        response.append(rbuf, bytes);
+      }
+    } while (bytes > 0);
+    CLOSE_SOCKET(sock);
+    return response;
+  }
+
   // Create SSL Context
   const SSL_METHOD *ssl_method = TLS_client_method();
   SSL_CTX *ctx = SSL_CTX_new(ssl_method);
@@ -349,22 +395,6 @@ PerformRequest(const std::string &method, const std::string &url,
     return "";
   }
 
-  // Form the HTTP request line + headers (+ optional body).
-  std::stringstream request;
-  request << method << " " << path << " HTTP/1.1\r\n"
-          << "Host: " << host << "\r\n"
-          << "User-Agent: HylmiBrowser/1.0\r\n"
-          << "Accept: */*\r\n";
-  if (!body.empty()) {
-    request << "Content-Type: " << contentType << "\r\n"
-            << "Content-Length: " << body.size() << "\r\n";
-  }
-  request << "Connection: close\r\n\r\n";
-  if (!body.empty()) {
-    request << body;
-  }
-
-  std::string req_str = request.str();
   if (SSL_write(ssl, req_str.c_str(), req_str.length()) <= 0) {
     std::cerr << "Failed to send HTTP request over SSL." << std::endl;
     SSL_free(ssl);

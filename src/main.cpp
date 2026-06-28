@@ -1,52 +1,52 @@
 #include "../include/BaseWindow.hpp"
-#include "../include/Css.hpp"
-#include "../include/Layout.hpp"
-#include "../include/Paint.hpp"
-#include "../include/Wrapper.hpp"
+#include "../include/Browser.hpp"
+#include "../include/Net.hpp"
 
 #include <string>
 
 using namespace DesktopWebview;
 
-int main() {
-  // A small demo page exercising the full pipeline: HTML -> DOM -> CSS cascade
-  // -> box-model layout -> paint -> on-screen presentation.
-  const std::string html = "<html><body>"
-                           "<div id='header'></div>"
-                           "<div id='content'>"
-                           "<div id='sidebar'></div>"
-                           "<div id='main'></div>"
-                           "</div>"
-                           "<div id='footer'></div>"
-                           "</body></html>";
+int main(int argc, char **argv) {
+  Net::Init();
 
-  const std::string css =
-      "body { background-color: #f0f0f0; }"
-      "#header { height: 80px; background-color: #3366cc; }"
-      "#content { background-color: #ffffff; padding: 20px; }"
-      "#sidebar { height: 200px; width: 220px; background-color: #dde8ff;"
-      "           border: 3px solid #3366cc; margin: 0 0 20px 0; }"
-      "#main { height: 160px; background-color: #fbe8d0;"
-      "        border: 1px solid #cccccc; }"
-      "#footer { height: 60px; background-color: #333333; }";
+  // Start URL: first CLI argument, else a local server. Type a new URL into the
+  // address bar and press Enter to navigate.
+  std::string startUrl = (argc > 1) ? argv[1] : "http://localhost/";
 
-  Wrapper::HtmlDocument doc;
-  doc.parse(html);
-  Css::Stylesheet sheet = Css::parse(css);
-  Layout::StyledNode style = Layout::styleTree(doc.root(), sheet);
+  Browser::Browser browser;
+  browser.navigate(startUrl);
 
   BaseWindow window;
-  window.SetRenderCallback([&style](int width, int height) {
-    Layout::LayoutBox box = Layout::layout(style, static_cast<float>(width),
-                                           static_cast<float>(height));
-    Paint::DisplayList list = Paint::buildDisplayList(box);
+  window.SetRenderCallback([&browser](int width, int height) {
+    return browser.render(width, height);
+  });
 
-    Paint::Canvas canvas(width, height);
-    canvas.clear(Paint::Color{255, 255, 255, 255});
-    canvas.paint(list);
-    return canvas;
+  window.SetKeyCallback([&browser](const BaseWindow::Key &k) {
+    Browser::KeyInput in;
+    switch (k.kind) {
+    case BaseWindow::Key::Char:
+      in.kind = Browser::KeyInput::Char;
+      in.ch = k.ch;
+      break;
+    case BaseWindow::Key::Backspace:
+      in.kind = Browser::KeyInput::Backspace;
+      break;
+    case BaseWindow::Key::Enter:
+      in.kind = Browser::KeyInput::Enter;
+      break;
+    }
+    return browser.handleKey(in);
+  });
+
+  window.SetMouseCallback([&browser](const BaseWindow::MouseEvent &m) {
+    if (m.kind == BaseWindow::MouseEvent::ButtonDown) {
+      return browser.handleClick(m.x, m.y);
+    }
+    return false;
   });
 
   window.Run();
+
+  Net::Cleanup();
   return 0;
 }

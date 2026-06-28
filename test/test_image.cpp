@@ -121,6 +121,29 @@ static void PpmTests() {
   std::remove(path.c_str());
 }
 
+// A 4x4 solid orange (255,128,0) PNG, to exercise the stb_image path.
+static const unsigned char kPng[] = {
+    137, 80,  78,  71,  13, 10,  26, 10,  0,   0,   0,   13,  73,  72, 68,
+    82,  0,   0,   0,   4,  0,   0,  0,   4,   8,   6,   0,   0,   0,  169,
+    241, 158, 126, 0,   0,  0,   18, 73,  68,  65,  84,  120, 156, 99, 248,
+    223, 192, 240, 31,  25, 51,  144, 46, 0,   0,   80,  79,  39,  225, 235,
+    0,   248, 165, 0,   0,  0,   0,  73,  69,  78,  68,  174, 66,  96, 130};
+
+static void PngTests() {
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "PNG decoding (stb_image)" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  Check("format not BMP/PPM",
+        Image::detectFormat(kPng, sizeof(kPng)) == Image::Format::Unknown);
+  Image::Bitmap img;
+  Check("PNG decode succeeds", Image::decode(kPng, sizeof(kPng), img));
+  Check("PNG dims 4x4", img.width == 4 && img.height == 4);
+  Check("PNG pixel is orange (255,128,0)", Eq(img.at(2, 2), 255, 128, 0));
+}
+
 static void BlitTests() {
   std::cout << "\n=========================================================="
             << std::endl;
@@ -149,6 +172,7 @@ static void BlitTests() {
 int main() {
   BmpTests();
   PpmTests();
+  PngTests();
   BlitTests();
 
   std::cout << "\n=========================================================="

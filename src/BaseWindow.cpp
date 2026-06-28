@@ -17,6 +17,14 @@ void BaseWindow::SetRenderCallback(RenderCallback callback) {
   m_render = std::move(callback);
 }
 
+void BaseWindow::SetKeyCallback(KeyCallback callback) {
+  m_key = std::move(callback);
+}
+
+void BaseWindow::SetMouseCallback(MouseCallback callback) {
+  m_mouse = std::move(callback);
+}
+
 Paint::Canvas BaseWindow::RenderContent() {
   int w = m_width > 0 ? m_width : 1;
   int h = m_height > 0 ? m_height : 1;
@@ -634,8 +642,51 @@ LRESULT BaseWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam,
   case WM_KEYDOWN:
     if (wParam == VK_ESCAPE) {
       DestroyWindow(hwnd);
+    } else if (wParam == VK_LEFT || wParam == VK_RIGHT) {
+      if (m_key) {
+        Key e;
+        e.kind = (wParam == VK_LEFT) ? Key::Left : Key::Right;
+        if (m_key(e)) {
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+      }
     }
     return 0;
+
+  case WM_CHAR: {
+    if (!m_key) {
+      return 0;
+    }
+    Key e;
+    char c = static_cast<char>(wParam);
+    if (c == '\r') {
+      e.kind = Key::Enter;
+    } else if (c == '\b') {
+      e.kind = Key::Backspace;
+    } else if (c >= 32 && c < 127) {
+      e.kind = Key::Char;
+      e.ch = c;
+    } else {
+      return 0;
+    }
+    if (m_key(e)) {
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return 0;
+  }
+
+  case WM_LBUTTONDOWN: {
+    if (m_mouse) {
+      MouseEvent e;
+      e.kind = MouseEvent::ButtonDown;
+      e.x = LOWORD(lParam);
+      e.y = HIWORD(lParam);
+      if (m_mouse(e)) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+      }
+    }
+    return 0;
+  }
 
   case WM_CLOSE:
     DestroyWindow(hwnd);
@@ -731,7 +782,8 @@ void BaseWindow::Run() {
 
   XStoreName(display, window, "DesktopWebview");
   XSelectInput(display, window,
-               ExposureMask | KeyPressMask | StructureNotifyMask);
+               ExposureMask | KeyPressMask | ButtonPressMask |
+                   StructureNotifyMask);
 
   Atom wmDelete = XInternAtom(display, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(display, window, &wmDelete, 1);
@@ -778,11 +830,48 @@ void BaseWindow::Run() {
       break;
     }
 
-    case KeyPress:
-      if (XLookupKeysym(&event.xkey, 0) == XK_Escape) {
+    case KeyPress: {
+      char buf[8] = {0};
+      KeySym ks = 0;
+      int n = XLookupString(&event.xkey, buf, sizeof(buf), &ks, nullptr);
+      if (ks == XK_Escape) {
         running = false;
+      } else if (m_key) {
+        Key e;
+        bool deliver = true;
+        if (ks == XK_Return || ks == XK_KP_Enter) {
+          e.kind = Key::Enter;
+        } else if (ks == XK_BackSpace) {
+          e.kind = Key::Backspace;
+        } else if (ks == XK_Left) {
+          e.kind = Key::Left;
+        } else if (ks == XK_Right) {
+          e.kind = Key::Right;
+        } else if (n == 1 && buf[0] >= 32 && buf[0] < 127) {
+          e.kind = Key::Char;
+          e.ch = buf[0];
+        } else {
+          deliver = false;
+        }
+        if (deliver && m_key(e)) {
+          Present(RenderContent());
+        }
       }
       break;
+    }
+
+    case ButtonPress: {
+      if (event.xbutton.button == Button1 && m_mouse) {
+        MouseEvent e;
+        e.kind = MouseEvent::ButtonDown;
+        e.x = event.xbutton.x;
+        e.y = event.xbutton.y;
+        if (m_mouse(e)) {
+          Present(RenderContent());
+        }
+      }
+      break;
+    }
 
     case ClientMessage:
       if (static_cast<Atom>(event.xclient.data.l[0]) == wmDelete) {

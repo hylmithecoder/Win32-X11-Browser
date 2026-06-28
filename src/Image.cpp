@@ -6,6 +6,9 @@
 #include <fstream>
 #include <iterator>
 
+// Declarations only; the implementation is compiled in src/stb_impl.cpp.
+#include "stb_image.h"
+
 namespace DesktopWebview {
 namespace Image {
 
@@ -206,6 +209,29 @@ Format detectFormat(const std::uint8_t *data, std::size_t size) {
   return Format::Unknown;
 }
 
+namespace {
+
+// Decode PNG/JPEG/GIF/etc. via stb_image (forced to RGBA).
+bool DecodeStb(const std::uint8_t *data, std::size_t size, Bitmap &out) {
+  int w = 0, h = 0, channels = 0;
+  stbi_uc *pixels =
+      stbi_load_from_memory(data, static_cast<int>(size), &w, &h, &channels, 4);
+  if (!pixels) {
+    return false;
+  }
+  out.width = w;
+  out.height = h;
+  out.pixels.resize(static_cast<size_t>(w) * h);
+  for (int i = 0; i < w * h; ++i) {
+    out.pixels[i] = Paint::Color{pixels[i * 4 + 0], pixels[i * 4 + 1],
+                                 pixels[i * 4 + 2], pixels[i * 4 + 3]};
+  }
+  stbi_image_free(pixels);
+  return out.valid();
+}
+
+} // namespace
+
 bool decode(const std::uint8_t *data, std::size_t size, Bitmap &out) {
   switch (detectFormat(data, size)) {
   case Format::Bmp:
@@ -213,7 +239,8 @@ bool decode(const std::uint8_t *data, std::size_t size, Bitmap &out) {
   case Format::Ppm:
     return DecodePpm(data, size, out);
   default:
-    return false;
+    // PNG / JPEG / GIF / etc.
+    return DecodeStb(data, size, out);
   }
 }
 

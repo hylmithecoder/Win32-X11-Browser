@@ -209,9 +209,9 @@ bool HtmlDocument::parse(const std::string &html, const std::string &baseUrl) {
   // forgiving parser.
   const int options = HTML_PARSE_RECOVER | HTML_PARSE_NOERROR |
                       HTML_PARSE_NOWARNING | HTML_PARSE_NONET;
-  htmlDocPtr doc = htmlReadMemory(
-      html.c_str(), static_cast<int>(html.size()),
-      baseUrl.empty() ? nullptr : baseUrl.c_str(), nullptr, options);
+  htmlDocPtr doc = htmlReadMemory(html.c_str(), static_cast<int>(html.size()),
+                                  baseUrl.empty() ? nullptr : baseUrl.c_str(),
+                                  nullptr, options);
   m_doc = reinterpret_cast<_xmlDoc *>(doc);
   return m_doc != nullptr;
 }

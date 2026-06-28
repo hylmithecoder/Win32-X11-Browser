@@ -54,6 +54,37 @@ private:
   Paint::Color m_bar;
 };
 
+// A video source that decodes a custom uncompressed raw video file (.rawv).
+// The file layout is:
+// - Magic string: "RAWV" (4 bytes)
+// - Width: uint32_t (4 bytes)
+// - Height: uint32_t (4 bytes)
+// - Framerate: double (8 bytes)
+// - FrameCount: uint32_t (4 bytes)
+// - Data: Raw RGBA pixel array for all frames (width * height * 4 * frameCount
+// bytes)
+class FileVideoSource : public VideoSource {
+public:
+  explicit FileVideoSource(const std::string &filePath);
+
+  int width() const override { return m_width; }
+  int height() const override { return m_height; }
+  double frameRate() const override { return m_frameRate; }
+  int frameCount() const override { return m_frameCount; }
+  bool frameAt(int index, Image::Bitmap &out) override;
+
+  bool valid() const { return m_valid; }
+
+private:
+  std::string m_filePath;
+  int m_width = 0;
+  int m_height = 0;
+  double m_frameRate = 0.0;
+  int m_frameCount = 0;
+  bool m_valid = false;
+  std::vector<std::uint8_t> m_fileData;
+};
+
 } // namespace Video
 } // namespace DesktopWebview
 

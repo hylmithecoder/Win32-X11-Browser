@@ -34,12 +34,34 @@ public:
 
   void SetRenderCallback(RenderCallback callback);
 
+  // A keyboard event delivered to the application (e.g. the address bar).
+  struct Key {
+    enum Kind { Char, Backspace, Enter, Left, Right };
+    Kind kind = Char;
+    char ch = 0;
+  };
+  // Invoked on text input / editing keys. Returning true requests a repaint.
+  using KeyCallback = std::function<bool(const Key &)>;
+  void SetKeyCallback(KeyCallback callback);
+
+  // A mouse event delivered to the application (e.g. for link clicking).
+  struct MouseEvent {
+    enum Kind { ButtonDown, ButtonUp };
+    Kind kind = ButtonDown;
+    int x = 0;
+    int y = 0;
+  };
+  using MouseCallback = std::function<bool(const MouseEvent &)>;
+  void SetMouseCallback(MouseCallback callback);
+
   // Open the window and run the event loop until the user closes it or presses
   // Escape. Blocks until the window closes.
   void Run();
 
 private:
   RenderCallback m_render;
+  KeyCallback m_key;
+  MouseCallback m_mouse;
   int m_width = 1024;
   int m_height = 720;
 
