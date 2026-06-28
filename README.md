@@ -52,3 +52,7 @@ This repository contains a Nix development shell setup (`shell.nix`) containing 
 * `include/` & `src/`: Core engine implementations (JsEngine, Network, Parser, CSS, Layout, Graphics presentation).
 * `test/`: Native unit testing targets verifying JS interpretation, networking, and rendering.
 * `assets/`: Default user-agent styles and preloaded page resources.
+
+# License
+MIT License
+[MIT](LICENSE) — © 2026 Hylmi
