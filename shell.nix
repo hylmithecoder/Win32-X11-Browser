@@ -23,6 +23,7 @@ if cross then (
       mingwPkgs.libxml2
       mingwPkgs.libiconv  # libxml2's static archive references iconv symbols
       mingwPkgs.vulkan-loader
+      mingwPkgs.ffmpeg  # libav* for Windows video decode (optional; guarded in CMake)
       pkgs.xorg.libX11
       pkgs.xorg.libXext
       pkgs.libGL
@@ -123,6 +124,10 @@ if cross then (
         echo "Running Windows TestJs executable via Wine..."
         echo "=========================================================="
         wine64 build-windows/TestJs.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestBase64 executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestBase64.exe || status=$?
         return $status
       }
     '';
@@ -157,6 +162,10 @@ if cross then (
       pkgs.vulkan-validation-layers
       pkgs.alsa-lib       # ALSA audio output backend (libasound)
       pkgs.alsa-lib.dev
+      pkgs.ffmpeg         # libavformat/libavcodec/libavutil/libswscale (video decode)
+      pkgs.ffmpeg.dev
+      pkgs.opencl-headers # OpenCL C headers (CL/cl.h)
+      pkgs.ocl-icd        # OpenCL ICD loader (libOpenCL.so)
     ];
 
     shellHook = ''
@@ -241,6 +250,10 @@ if cross then (
         echo "Running Linux TestJs executable..."
         echo "=========================================================="
         ./build-linux/TestJs || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestBase64 executable..."
+        echo "=========================================================="
+        ./build-linux/TestBase64 || status=$?
         return $status
       }
     '';

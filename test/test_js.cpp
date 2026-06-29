@@ -77,8 +77,55 @@ int main() {
         el.isElement && el.elementId == "heading");
 
   engine.execute("el.innerText = 'Updated text!';");
-  Check("el.innerText sets element text in DOM/C++",
+  Check("el.innerText sets element text in C++",
         elementId == "heading" && elementIdText == "Updated text!");
+
+  // 7. Test global function declaration and call
+  engine.execute("function add(a, b) { return a + b; }");
+
+  // 8. Test function call with arguments and check return value
+  engine.execute("var sum = add(7, 3);");
+  Js::JsValue sum = engine.getGlobalEnv()->get("sum");
+  Check("function call with arguments (add(7,3)), expected 10",
+        sum.numberVal == 10.0);
+
+  // 9. Test nested function calls. compose(f, g, x) = f(g(x)); both f and g
+  // are unary, so compose(double, square, 3) = double(9) = 18.
+  engine.execute("function compose(f, g, x) { return f(g(x)); }");
+  engine.execute("var result = compose(function(n){return n+n;}, "
+                 "function(y){return y*y;}, 3);");
+  Js::JsValue result = engine.getGlobalEnv()->get("result");
+  Check("nested function calls (compose(double, square, 3)), expected 18.0, got " +
+            std::to_string(result.numberVal),
+        result.numberVal == 18.0);
+
+  // 10. Test if-else statement
+  engine.execute("var isEven = function(n){ if (n % 2 === 0) return true; else "
+                 "return false; };");
+  engine.execute("var evenTest = isEven(4);");
+  Js::JsValue evenTest = engine.getGlobalEnv()->get("evenTest");
+  Check("if-else statement (isEven(4)), expected true",
+        evenTest.boolVal == true);
+
+  // 11. Test while loop
+  engine.execute("var i = 0; while (i < 5) { i++; }");
+  Js::JsValue i = engine.getGlobalEnv()->get("i");
+  Check("while loop (i < 5, increment i), expected 5", i.numberVal == 5.0);
+
+  // 12. Test for loop
+  engine.execute(
+      "var sumFor = 0; for (var j = 1; j <= 5; j++) { sumFor += j; }");
+  Js::JsValue sumFor = engine.getGlobalEnv()->get("sumFor");
+  Check("for loop (1 to 5 inclusive), expected 15", sumFor.numberVal == 15.0);
+
+  // 13. Test array declaration
+  engine.execute("var arr = [10, 20, 30, 40, 50];");
+
+  // 14. Test array element access
+  engine.execute("var secondElement = arr[1];");
+  Js::JsValue secondElement = engine.getGlobalEnv()->get("secondElement");
+  Check("array element access (arr[1]), expected 20",
+        secondElement.numberVal == 20.0);
 
   std::cout << "\n=========================================================="
             << std::endl;

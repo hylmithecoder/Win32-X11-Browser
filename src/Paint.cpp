@@ -87,8 +87,71 @@ bool ParseHex(const std::string &s, Color &out) {
   return true;
 }
 
-// Parse "rgb(...)" / "rgba(...)" with comma-separated integer channels and an
-// optional 0-1 alpha.
+std::vector<std::string> ParseColorArgs(const std::string &inner) {
+  std::vector<std::string> args;
+  std::string cur;
+  for (char c : inner) {
+    if (c == ',' || c == '/' || std::isspace(static_cast<unsigned char>(c))) {
+      std::string trimmed = Trim(cur);
+      if (!trimmed.empty()) {
+        args.push_back(trimmed);
+      }
+      cur.clear();
+    } else {
+      cur.push_back(c);
+    }
+  }
+  std::string trimmed = Trim(cur);
+  if (!trimmed.empty()) {
+    args.push_back(trimmed);
+  }
+  return args;
+}
+
+Color HslToRgb(float h, float s, float l, std::uint8_t alpha = 255) {
+  h = std::fmod(h, 360.0f);
+  if (h < 0)
+    h += 360.0f;
+
+  float c = (1.0f - std::abs(2.0f * l - 1.0f)) * s;
+  float x = c * (1.0f - std::abs(std::fmod(h / 60.0f, 2.0f) - 1.0f));
+  float m = l - c / 2.0f;
+
+  float r = 0, g = 0, b = 0;
+  if (h >= 0 && h < 60) {
+    r = c;
+    g = x;
+    b = 0;
+  } else if (h >= 60 && h < 120) {
+    r = x;
+    g = c;
+    b = 0;
+  } else if (h >= 120 && h < 180) {
+    r = 0;
+    g = c;
+    b = x;
+  } else if (h >= 180 && h < 240) {
+    r = 0;
+    g = x;
+    b = c;
+  } else if (h >= 240 && h < 300) {
+    r = x;
+    g = 0;
+    b = c;
+  } else {
+    r = c;
+    g = 0;
+    b = x;
+  }
+
+  Color rgb;
+  rgb.r = static_cast<std::uint8_t>(std::clamp((r + m) * 255.0f, 0.0f, 255.0f));
+  rgb.g = static_cast<std::uint8_t>(std::clamp((g + m) * 255.0f, 0.0f, 255.0f));
+  rgb.b = static_cast<std::uint8_t>(std::clamp((b + m) * 255.0f, 0.0f, 255.0f));
+  rgb.a = alpha;
+  return rgb;
+}
+
 bool ParseRgbFunction(const std::string &s, Color &out) {
   size_t open = s.find('(');
   size_t close = s.find(')');
@@ -96,40 +159,82 @@ bool ParseRgbFunction(const std::string &s, Color &out) {
     return false;
   }
   std::string inner = s.substr(open + 1, close - open - 1);
-  std::vector<std::string> parts;
-  std::stringstream ss(inner);
-  std::string part;
-  while (std::getline(ss, part, ',')) {
-    parts.push_back(Trim(part));
-  }
+  std::vector<std::string> parts = ParseColorArgs(inner);
   if (parts.size() != 3 && parts.size() != 4) {
     return false;
   }
-  auto channel = [](const std::string &p, bool &ok) -> int {
-    ok = !p.empty();
-    if (!ok) {
+
+  auto parseChannel = [](const std::string &arg, bool &ok) -> int {
+    ok = !arg.empty();
+    if (!ok)
       return 0;
+    float val = std::atof(arg.c_str());
+    if (arg.find('%') != std::string::npos) {
+      val = val / 100.0f * 255.0f;
     }
-    int v = std::atoi(p.c_str());
-    return std::clamp(v, 0, 255);
+    return std::clamp(static_cast<int>(val), 0, 255);
   };
+
   bool ok = true;
   bool partOk = false;
   Color c;
-  c.r = static_cast<std::uint8_t>(channel(parts[0], partOk));
+  c.r = static_cast<std::uint8_t>(parseChannel(parts[0], partOk));
   ok = ok && partOk;
-  c.g = static_cast<std::uint8_t>(channel(parts[1], partOk));
+  c.g = static_cast<std::uint8_t>(parseChannel(parts[1], partOk));
   ok = ok && partOk;
-  c.b = static_cast<std::uint8_t>(channel(parts[2], partOk));
+  c.b = static_cast<std::uint8_t>(parseChannel(parts[2], partOk));
   ok = ok && partOk;
+
   if (parts.size() == 4) {
-    double alpha = std::atof(parts[3].c_str());
-    c.a = static_cast<std::uint8_t>(std::clamp(alpha, 0.0, 1.0) * 255.0 + 0.5);
+    float alphaVal = std::atof(parts[3].c_str());
+    if (parts[3].find('%') != std::string::npos) {
+      alphaVal = alphaVal / 100.0f;
+    }
+    c.a = static_cast<std::uint8_t>(std::clamp(alphaVal, 0.0f, 1.0f) * 255.0f +
+                                    0.5f);
+  } else {
+    c.a = 255;
   }
   if (!ok) {
     return false;
   }
   out = c;
+  return true;
+}
+
+bool ParseHslFunction(const std::string &s, Color &out) {
+  size_t open = s.find('(');
+  size_t close = s.find(')');
+  if (open == std::string::npos || close == std::string::npos || close < open) {
+    return false;
+  }
+  std::string inner = s.substr(open + 1, close - open - 1);
+  std::vector<std::string> parts = ParseColorArgs(inner);
+  if (parts.size() != 3 && parts.size() != 4) {
+    return false;
+  }
+
+  float h = std::atof(parts[0].c_str());
+  float s_val = std::atof(parts[1].c_str());
+  if (parts[1].find('%') != std::string::npos) {
+    s_val /= 100.0f;
+  }
+  float l_val = std::atof(parts[2].c_str());
+  if (parts[2].find('%') != std::string::npos) {
+    l_val /= 100.0f;
+  }
+
+  std::uint8_t alpha = 255;
+  if (parts.size() == 4) {
+    float alphaVal = std::atof(parts[3].c_str());
+    if (parts[3].find('%') != std::string::npos) {
+      alphaVal = alphaVal / 100.0f;
+    }
+    alpha = static_cast<std::uint8_t>(
+        std::clamp(alphaVal, 0.0f, 1.0f) * 255.0f + 0.5f);
+  }
+
+  out = HslToRgb(h, s_val, l_val, alpha);
   return true;
 }
 
@@ -268,6 +373,9 @@ bool parseColor(const std::string &text, Color &out) {
   }
   if (s.rfind("rgb", 0) == 0) {
     return ParseRgbFunction(s, out);
+  }
+  if (s.rfind("hsl", 0) == 0) {
+    return ParseHslFunction(s, out);
   }
   auto it = NamedColors().find(s);
   if (it != NamedColors().end()) {

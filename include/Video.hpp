@@ -4,6 +4,9 @@
 #include "Image.hpp"
 #include "Paint.hpp"
 
+#include <memory>
+#include <string>
+
 namespace DesktopWebview {
 namespace Video {
 
@@ -84,6 +87,35 @@ private:
   bool m_valid = false;
   std::vector<std::uint8_t> m_fileData;
 };
+
+// Decodes a real compressed video file or URL (mp4/webm/mkv/...) via ffmpeg's
+// libavformat/libavcodec/libswscale. Only functional when the project is built
+// with DWV_HAVE_FFMPEG; otherwise `valid()` is false. All ffmpeg state is kept
+// behind an opaque Impl so the header stays free of libav includes.
+class FfmpegVideoSource : public VideoSource {
+public:
+  explicit FfmpegVideoSource(const std::string &pathOrUrl);
+  ~FfmpegVideoSource() override;
+
+  int width() const override;
+  int height() const override;
+  double frameRate() const override;
+  int frameCount() const override;
+  bool frameAt(int index, Image::Bitmap &out) override;
+
+  bool valid() const;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> m_impl;
+};
+
+// Pick the best available decoder for a path or URL:
+// - "*.rawv"            -> FileVideoSource (custom uncompressed format)
+// - anything else       -> FfmpegVideoSource when built with ffmpeg and the
+//                          file opens; otherwise a SyntheticVideoSource preview.
+// Never returns null.
+std::unique_ptr<VideoSource> openVideoFile(const std::string &pathOrUrl);
 
 } // namespace Video
 } // namespace DesktopWebview

@@ -21,6 +21,8 @@ static void Check(const std::string &label, bool condition) {
 // Float comparison tolerant of rounding.
 static bool Near(float a, float b) { return std::fabs(a - b) < 0.5f; }
 
+static void AdvancedLayoutTests();
+
 static void CheckNear(const std::string &label, float actual, float expected) {
   bool ok = Near(actual, expected);
   if (!ok) {
@@ -142,6 +144,8 @@ int main() {
               body->dimensions.content.height, 210.0f);
   }
 
+  AdvancedLayoutTests();
+
   std::cout << "\n=========================================================="
             << std::endl;
   if (g_failures == 0) {
@@ -152,4 +156,71 @@ int main() {
   std::cout << "=========================================================="
             << std::endl;
   return g_failures == 0 ? 0 : 1;
+}
+
+static void AdvancedLayoutTests() {
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "Advanced Layout (max-width, flex wrapping, grid areas/spans)"
+            << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  // 1. Test max-width
+  {
+    const std::string html = "<html><body><div id=\"mw\"></div></body></html>";
+    const std::string css = "#mw { width: 500px; max-width: 300px; }";
+    Wrapper::HtmlDocument doc;
+    doc.parse(html);
+    Css::Stylesheet sheet = Css::parse(css);
+    Layout::StyledNode style = Layout::styleTree(doc.root(), sheet);
+    Layout::LayoutBox root = Layout::layout(style, 800.0f);
+    const Layout::LayoutBox *mw = FindById(root, "mw");
+    Check("max-width overrides width (300)",
+          mw && Near(mw->dimensions.content.width, 300.0f));
+  }
+
+  // 2. Test flex-wrap
+  {
+    const std::string html = "<html><body><div id=\"flex\">"
+                             "  <div id=\"f1\"></div><div id=\"f2\"></div>"
+                             "</div></body></html>";
+    const std::string css =
+        "#flex { display: flex; flex-wrap: wrap; width: 200px; }"
+        "#f1 { width: 150px; height: 50px; }"
+        "#f2 { width: 100px; height: 50px; }";
+    Wrapper::HtmlDocument doc;
+    doc.parse(html);
+    Css::Stylesheet sheet = Css::parse(css);
+    Layout::StyledNode style = Layout::styleTree(doc.root(), sheet);
+    Layout::LayoutBox root = Layout::layout(style, 400.0f);
+    const Layout::LayoutBox *f1 = FindById(root, "f1");
+    const Layout::LayoutBox *f2 = FindById(root, "f2");
+    Check("flex item 1 placed on line 0",
+          f1 && Near(f1->dimensions.content.y, 0.0f));
+    Check("flex item 2 wrapped to line 1",
+          f2 && Near(f2->dimensions.content.y, 50.0f));
+  }
+
+  // 3. Test grid template areas & spans
+  {
+    const std::string html = "<html><body><div id=\"grid\">"
+                             "  <div id=\"g1\"></div><div id=\"g2\"></div>"
+                             "</div></body></html>";
+    const std::string css = "#grid { display: grid; grid-template-columns: "
+                            "100px 100px; grid-template-areas: 'a b'; }"
+                            "#g1 { grid-area: b; }"
+                            "#g2 { grid-column: span 2; }";
+    Wrapper::HtmlDocument doc;
+    doc.parse(html);
+    Css::Stylesheet sheet = Css::parse(css);
+    Layout::StyledNode style = Layout::styleTree(doc.root(), sheet);
+    Layout::LayoutBox root = Layout::layout(style, 300.0f);
+    const Layout::LayoutBox *g1 = FindById(root, "g1");
+    const Layout::LayoutBox *g2 = FindById(root, "g2");
+    Check("grid item g1 placed in area b (col 1)",
+          g1 && Near(g1->dimensions.content.x, 100.0f));
+    Check("grid item g2 spans 2 columns (width 200)",
+          g2 && Near(g2->dimensions.content.width, 200.0f));
+  }
 }

@@ -259,10 +259,21 @@ LayoutBox BuildLayoutTree(const StyledNode &sn) {
 // ---- block layout ----------------------------------------------------------
 
 void LayoutBlock(LayoutBox &box, const Dimensions &containing);
+void LayoutFlex(LayoutBox &box, const Dimensions &containing);
+void LayoutGrid(LayoutBox &box, const Dimensions &containing);
 
 void Layout(LayoutBox &box, const Dimensions &containing) {
-  // MVP: inline and anonymous boxes use the block algorithm (vertical stack).
-  LayoutBlock(box, containing);
+  // Dispatch on the box's `display`. Flex and grid get dedicated algorithms;
+  // everything else (block/inline/anonymous) uses the block (vertical stack)
+  // algorithm.
+  std::string disp = box.node ? box.node->display() : "block";
+  if (disp == "flex" || disp == "inline-flex") {
+    LayoutFlex(box, containing);
+  } else if (disp == "grid" || disp == "inline-grid") {
+    LayoutGrid(box, containing);
+  } else {
+    LayoutBlock(box, containing);
+  }
 }
 
 void CalculateBlockWidth(LayoutBox &box, const Dimensions &containing) {
@@ -335,6 +346,26 @@ void CalculateBlockWidth(LayoutBox &box, const Dimensions &containing) {
     }
   }
 
+  Value maxWidth = ParseValue(box.value("max-width"));
+  if (maxWidth.kind != Value::Kind::Auto) {
+    float maxW = maxWidth.toPx(cb);
+    if (w > maxW) {
+      w = maxW;
+      float newTotal = w + ml + mr + pl + pr + bl + br;
+      float newUnderflow = cb - newTotal;
+      if (!mla && !mra) {
+        mr += newUnderflow;
+      } else if (!mla && mra) {
+        mr = newUnderflow;
+      } else if (mla && !mra) {
+        ml = newUnderflow;
+      } else {
+        ml = newUnderflow / 2.0f;
+        mr = newUnderflow / 2.0f;
+      }
+    }
+  }
+
   d.content.width = w;
   d.padding.left = pl;
   d.padding.right = pr;
@@ -383,6 +414,747 @@ void LayoutBlock(LayoutBox &box, const Dimensions &containing) {
   CalculateBlockWidth(box, containing);
   CalculateBlockPosition(box, containing);
   LayoutBlockChildren(box);
+  CalculateBlockHeight(box);
+}
+
+// ---- flex / grid layout ----------------------------------------------------
+
+// Resolve an item's margin/border/padding edges (in px, against `cb`) directly
+// into its Dimensions, treating auto as 0. Used by the flex/grid item placement
+// which positions boxes explicitly rather than via block underflow rules.
+void SetItemEdges(LayoutBox &box, float cb) {
+  std::array<Value, 4> m = ResolveMargin(box);
+  std::array<Value, 4> b = ResolveBorder(box);
+  std::array<Value, 4> p = ResolvePadding(box);
+  auto px = [&](const Value &v) { return v.isAuto() ? 0.0f : v.toPx(cb); };
+  Dimensions &d = box.dimensions;
+  // EdgeSizes order: left, right, top, bottom. Resolve* order:
+  // top,right,bot,left
+  d.margin = {px(m[3]), px(m[1]), px(m[0]), px(m[2])};
+  d.border = {px(b[3]), px(b[1]), px(b[0]), px(b[2])};
+  d.padding = {px(p[3]), px(p[1]), px(p[0]), px(p[2])};
+}
+
+// Child-layout phases, factored out so a flex/grid item that is itself a
+// flex/grid container lays its own children out correctly (these assume the
+// box's content rect x/y/width are already set).
+void GridChildren(LayoutBox &box);
+void FlexChildren(LayoutBox &box);
+
+// Lay out a box's children according to its own `display`, then resolve its
+// height. Assumes box.dimensions.content {x,y,width} are already established.
+void LayoutOwnChildren(LayoutBox &box) {
+  std::string disp = box.node ? box.node->display() : "block";
+  box.dimensions.content.height = 0;
+  if (disp == "flex" || disp == "inline-flex") {
+    FlexChildren(box);
+  } else if (disp == "grid" || disp == "inline-grid") {
+    GridChildren(box);
+  } else {
+    LayoutBlockChildren(box);
+  }
+  CalculateBlockHeight(box); // explicit pixel height overrides.
+}
+
+// Place a flex/grid item whose available outer (margin-box) width is `cellW`,
+// with its margin-box top-left at (cellX, cellY). An explicit width wins;
+// otherwise the item stretches to fill the cell. `cb` is the container content
+// width (for resolving percentages). The item then lays out its own children
+// per its display (so nested flex/grid works).
+void LayoutItemInCell(LayoutBox &item, float cellX, float cellY, float cellW,
+                      float cb) {
+  SetItemEdges(item, cb);
+  Dimensions &d = item.dimensions;
+  float horiz = d.margin.left + d.margin.right + d.border.left +
+                d.border.right + d.padding.left + d.padding.right;
+
+  Value w = ParseValue(item.value("width"));
+  float contentW;
+  if (w.kind == Value::Kind::Px) {
+    contentW = w.number;
+  } else if (w.kind == Value::Kind::Percent) {
+    contentW = w.toPx(cb);
+  } else {
+    contentW = std::max(0.0f, cellW - horiz); // auto stretches to the cell
+  }
+
+  Value maxWidth = ParseValue(item.value("max-width"));
+  if (maxWidth.kind != Value::Kind::Auto) {
+    float maxW = maxWidth.toPx(cb);
+    if (contentW > maxW) {
+      contentW = maxW;
+    }
+  }
+
+  d.content.width = contentW;
+  d.content.x = cellX + d.margin.left + d.border.left + d.padding.left;
+  d.content.y = cellY + d.margin.top + d.border.top + d.padding.top;
+
+  LayoutOwnChildren(item);
+}
+
+// Collect the in-flow item boxes of a flex/grid container (skip anonymous
+// whitespace boxes that have no DOM node).
+std::vector<LayoutBox *> FlowItems(LayoutBox &box) {
+  std::vector<LayoutBox *> items;
+  for (LayoutBox &ch : box.children) {
+    if (ch.node) {
+      items.push_back(&ch);
+    }
+  }
+  return items;
+}
+
+// Parse a `grid-template-columns` track list. Recognises `auto`, `<n>fr`,
+// lengths and percentages. `repeat(...)`/`minmax(...)` are not expanded.
+std::vector<Value> ParseTrackList(const std::string &s) {
+  std::vector<Value> out;
+  for (const std::string &tok : SplitWhitespace(s)) {
+    std::string t = ToLower(tok);
+    Value v;
+    if (t == "auto") {
+      v.kind = Value::Kind::Auto;
+    } else if (t.size() > 2 && t.substr(t.size() - 2) == "fr") {
+      v.kind = Value::Kind::Keyword;
+      v.keyword = "fr";
+      v.number = static_cast<float>(std::atof(t.c_str()));
+    } else {
+      v = ParseValue(tok);
+    }
+    out.push_back(v);
+  }
+  return out;
+}
+
+// Resolve column/row gaps from the `gap`/`grid-gap` shorthand and the
+// row-/column- longhands.
+void ResolveGaps(const LayoutBox &box, float cw, float &rowGap, float &colGap) {
+  rowGap = colGap = 0;
+  std::string g = box.value("gap");
+  if (g.empty()) {
+    g = box.value("grid-gap");
+  }
+  if (!g.empty()) {
+    std::vector<std::string> toks = SplitWhitespace(g);
+    if (!toks.empty()) {
+      rowGap = ParseValue(toks[0]).toPx(cw);
+      colGap = (toks.size() > 1 ? ParseValue(toks[1]) : ParseValue(toks[0]))
+                   .toPx(cw);
+    }
+  }
+  std::string rg = box.value("row-gap");
+  if (rg.empty()) {
+    rg = box.value("grid-row-gap");
+  }
+  if (!rg.empty()) {
+    rowGap = ParseValue(rg).toPx(cw);
+  }
+  std::string cg = box.value("column-gap");
+  if (cg.empty()) {
+    cg = box.value("grid-column-gap");
+  }
+  if (!cg.empty()) {
+    colGap = ParseValue(cg).toPx(cw);
+  }
+}
+
+// Resolve fixed/fr/auto column tracks into pixel widths. `auto` tracks are
+// treated as `1fr` (an even share of the remaining space).
+std::vector<float> ResolveTrackWidths(const std::vector<Value> &tracks,
+                                      float cw, float colGap) {
+  int n = static_cast<int>(tracks.size());
+  float fixed = 0, frSum = 0;
+  int autoCnt = 0;
+  for (const Value &t : tracks) {
+    if (t.kind == Value::Kind::Px) {
+      fixed += t.number;
+    } else if (t.kind == Value::Kind::Percent) {
+      fixed += t.toPx(cw);
+    } else if (t.kind == Value::Kind::Keyword && t.keyword == "fr") {
+      frSum += t.number;
+    } else {
+      autoCnt++;
+    }
+  }
+  float free = cw - fixed - colGap * (n - 1);
+  if (free < 0) {
+    free = 0;
+  }
+  float perFr = (frSum + autoCnt) > 0 ? free / (frSum + autoCnt) : 0;
+  std::vector<float> out(n);
+  for (int i = 0; i < n; ++i) {
+    const Value &t = tracks[i];
+    if (t.kind == Value::Kind::Px) {
+      out[i] = t.number;
+    } else if (t.kind == Value::Kind::Percent) {
+      out[i] = t.toPx(cw);
+    } else if (t.kind == Value::Kind::Keyword && t.keyword == "fr") {
+      out[i] = perFr * t.number;
+    } else {
+      out[i] = perFr;
+    }
+  }
+  return out;
+}
+
+struct Area {
+  int rowStart = -1;
+  int rowEnd = -1;
+  int colStart = -1;
+  int colEnd = -1;
+};
+
+std::map<std::string, Area> ParseGridTemplateAreas(const std::string &str) {
+  std::map<std::string, Area> areas;
+  std::vector<std::string> rows;
+  size_t i = 0;
+  while (i < str.size()) {
+    size_t open = str.find('"', i);
+    if (open == std::string::npos) {
+      open = str.find('\'', i);
+    }
+    if (open == std::string::npos) {
+      break;
+    }
+    char quoteChar = str[open];
+    size_t close = str.find(quoteChar, open + 1);
+    if (close == std::string::npos) {
+      break;
+    }
+    rows.push_back(str.substr(open + 1, close - open - 1));
+    i = close + 1;
+  }
+
+  for (int r = 0; r < (int)rows.size(); ++r) {
+    std::vector<std::string> cols = SplitWhitespace(rows[r]);
+    for (int c = 0; c < (int)cols.size(); ++c) {
+      std::string name = cols[c];
+      if (name == "." || name == "none") {
+        continue;
+      }
+      if (areas.find(name) == areas.end()) {
+        areas[name] = Area{r + 1, r + 2, c + 1, c + 2};
+      } else {
+        Area &a = areas[name];
+        if (r + 1 < a.rowStart)
+          a.rowStart = r + 1;
+        if (r + 2 > a.rowEnd)
+          a.rowEnd = r + 2;
+        if (c + 1 < a.colStart)
+          a.colStart = c + 1;
+        if (c + 2 > a.colEnd)
+          a.colEnd = c + 2;
+      }
+    }
+  }
+  return areas;
+}
+
+void ParseGridLine(const std::string &startVal, const std::string &endVal,
+                   const std::string &shorthand, int &start, int &span) {
+  start = -1;
+  span = 1;
+
+  std::string val = shorthand;
+  std::string s_val = startVal;
+  std::string e_val = endVal;
+
+  if (!val.empty()) {
+    size_t slash = val.find('/');
+    if (slash != std::string::npos) {
+      s_val = Trim(val.substr(0, slash));
+      e_val = Trim(val.substr(slash + 1));
+    } else {
+      s_val = Trim(val);
+      e_val = "";
+    }
+  }
+
+  auto parseToken = [](const std::string &tok, int &line, int &sp) {
+    std::string t = ToLower(Trim(tok));
+    if (t.empty() || t == "auto") {
+      return;
+    }
+    if (t.rfind("span", 0) == 0) {
+      std::string numPart = Trim(t.substr(4));
+      if (numPart.empty()) {
+        sp = 1;
+      } else {
+        sp = std::atoi(numPart.c_str());
+        if (sp < 1)
+          sp = 1;
+      }
+    } else {
+      int num = std::atoi(t.c_str());
+      if (num > 0) {
+        line = num;
+      }
+    }
+  };
+
+  parseToken(s_val, start, span);
+  int endLine = -1;
+  int endSpan = 1;
+  parseToken(e_val, endLine, endSpan);
+
+  if (endLine > 0 && start > 0) {
+    if (endLine > start) {
+      span = endLine - start;
+    } else {
+      span = start - endLine;
+      start = endLine;
+    }
+  } else if (endLine > 0) {
+    start = endLine - span;
+    if (start < 1)
+      start = 1;
+  } else if (endSpan > 1) {
+    span = endSpan;
+  }
+}
+
+struct YShifter {
+  static void shift(LayoutBox &b, float dy) {
+    b.dimensions.content.y += dy;
+    for (LayoutBox &child : b.children) {
+      shift(child, dy);
+    }
+  }
+};
+
+void GridChildren(LayoutBox &box) {
+  Dimensions &d = box.dimensions;
+  const float cw = d.content.width;
+
+  std::vector<Value> colTracks =
+      ParseTrackList(box.value("grid-template-columns"));
+  std::vector<Value> rowTracks =
+      ParseTrackList(box.value("grid-template-rows"));
+  std::vector<LayoutBox *> items = FlowItems(box);
+  if (items.empty()) {
+    return;
+  }
+
+  int numTemplateCols = colTracks.size();
+  int numTemplateRows = rowTracks.size();
+  int maxCols = numTemplateCols > 0 ? numTemplateCols : 1;
+  int maxRows = numTemplateRows > 0 ? numTemplateRows : 1;
+
+  std::map<std::string, Area> areas =
+      ParseGridTemplateAreas(box.value("grid-template-areas"));
+
+  std::vector<std::vector<bool>> occupied;
+  auto isFree = [&](int r, int c, int rs, int cs) -> bool {
+    for (int i = 0; i < rs; ++i) {
+      int currRow = r + i;
+      if (currRow >= (int)occupied.size()) {
+        continue;
+      }
+      for (int j = 0; j < cs; ++j) {
+        int currCol = c + j;
+        if (currCol >= (int)occupied[currRow].size()) {
+          continue;
+        }
+        if (occupied[currRow][currCol]) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
+  auto markOccupied = [&](int r, int c, int rs, int cs) {
+    if (r + rs > (int)occupied.size()) {
+      occupied.resize(r + rs, std::vector<bool>(maxCols, false));
+    }
+    for (int i = 0; i < rs; ++i) {
+      if (c + cs > (int)occupied[r + i].size()) {
+        for (auto &rowVec : occupied) {
+          rowVec.resize(c + cs, false);
+        }
+        if (c + cs > maxCols) {
+          maxCols = c + cs;
+        }
+      }
+    }
+    for (int i = 0; i < rs; ++i) {
+      for (int j = 0; j < cs; ++j) {
+        occupied[r + i][c + j] = true;
+      }
+    }
+  };
+
+  struct PlacedItem {
+    LayoutBox *box;
+    int col;
+    int row;
+    int colSpan;
+    int rowSpan;
+  };
+  std::vector<PlacedItem> placedItems;
+
+  for (LayoutBox *item : items) {
+    int colStart = -1, colSpan = 1;
+    int rowStart = -1, rowSpan = 1;
+
+    std::string c_start_val = item->value("grid-column-start");
+    std::string c_end_val = item->value("grid-column-end");
+    std::string c_shorthand = item->value("grid-column");
+    ParseGridLine(c_start_val, c_end_val, c_shorthand, colStart, colSpan);
+
+    std::string r_start_val = item->value("grid-row-start");
+    std::string r_end_val = item->value("grid-row-end");
+    std::string r_shorthand = item->value("grid-row");
+    ParseGridLine(r_start_val, r_end_val, r_shorthand, rowStart, rowSpan);
+
+    std::string areaVal = item->value("grid-area");
+    if (!areaVal.empty() && areas.find(areaVal) != areas.end()) {
+      const Area &a = areas[areaVal];
+      colStart = a.colStart;
+      colSpan = a.colEnd - a.colStart;
+      rowStart = a.rowStart;
+      rowSpan = a.rowEnd - a.rowStart;
+    } else if (!areaVal.empty()) {
+      std::vector<std::string> parts;
+      std::stringstream ss(areaVal);
+      std::string part;
+      while (std::getline(ss, part, '/')) {
+        parts.push_back(Trim(part));
+      }
+      std::string r_start = parts.size() > 0 ? parts[0] : "";
+      std::string c_start = parts.size() > 1 ? parts[1] : "";
+      std::string r_end = parts.size() > 2 ? parts[2] : "";
+      std::string c_end = parts.size() > 3 ? parts[3] : "";
+
+      ParseGridLine(r_start, r_end, "", rowStart, rowSpan);
+      ParseGridLine(c_start, c_end, "", colStart, colSpan);
+    }
+
+    int colIdx = -1;
+    int rowIdx = -1;
+
+    if (colStart > 0 && rowStart > 0) {
+      colIdx = colStart - 1;
+      rowIdx = rowStart - 1;
+    } else if (colStart > 0) {
+      colIdx = colStart - 1;
+      int r = 0;
+      while (!isFree(r, colIdx, rowSpan, colSpan)) {
+        r++;
+      }
+      rowIdx = r;
+    } else if (rowStart > 0) {
+      rowIdx = rowStart - 1;
+      int c = 0;
+      while (!isFree(rowIdx, c, rowSpan, colSpan)) {
+        c++;
+      }
+      colIdx = c;
+    } else {
+      int r = 0;
+      int c = 0;
+      bool found = false;
+      while (!found) {
+        int colsLimit = std::max(maxCols, 1);
+        for (c = 0; c < colsLimit; ++c) {
+          if (isFree(r, c, rowSpan, colSpan)) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          r++;
+        }
+      }
+      rowIdx = r;
+      colIdx = c;
+    }
+
+    markOccupied(rowIdx, colIdx, rowSpan, colSpan);
+    placedItems.push_back({item, colIdx, rowIdx, colSpan, rowSpan});
+
+    if (rowIdx + rowSpan > maxRows) {
+      maxRows = rowIdx + rowSpan;
+    }
+    if (colIdx + colSpan > maxCols) {
+      maxCols = colIdx + colSpan;
+    }
+  }
+
+  float rowGap, colGap;
+  ResolveGaps(box, cw, rowGap, colGap);
+
+  if ((int)colTracks.size() < maxCols) {
+    colTracks.resize(maxCols, Value{Value::Kind::Auto, 0, ""});
+  }
+  std::vector<float> colWidths = ResolveTrackWidths(colTracks, cw, colGap);
+
+  if ((int)rowTracks.size() < maxRows) {
+    rowTracks.resize(maxRows, Value{Value::Kind::Auto, 0, ""});
+  }
+
+  for (auto &pi : placedItems) {
+    float cellW = 0;
+    for (int c = 0; c < pi.colSpan; ++c) {
+      cellW += colWidths[pi.col + c];
+    }
+    cellW += colGap * (pi.colSpan - 1);
+    LayoutItemInCell(*pi.box, 0, 0, cellW, cw);
+  }
+
+  std::vector<float> rowHeights(maxRows, 0.0f);
+  for (int r = 0; r < maxRows; ++r) {
+    const Value &track = rowTracks[r];
+    if (track.kind == Value::Kind::Px) {
+      rowHeights[r] = track.number;
+    } else if (track.kind == Value::Kind::Percent) {
+      Value containerH = ParseValue(box.value("height"));
+      if (containerH.kind == Value::Kind::Px) {
+        rowHeights[r] = track.toPx(containerH.number);
+      }
+    }
+  }
+
+  for (auto &pi : placedItems) {
+    if (pi.rowSpan == 1) {
+      float itemH = pi.box->dimensions.marginBox().height;
+      if (rowTracks[pi.row].isAuto() ||
+          (rowTracks[pi.row].kind == Value::Kind::Keyword &&
+           rowTracks[pi.row].keyword == "fr")) {
+        rowHeights[pi.row] = std::max(rowHeights[pi.row], itemH);
+      }
+    }
+  }
+  for (auto &pi : placedItems) {
+    if (pi.rowSpan > 1) {
+      float itemH = pi.box->dimensions.marginBox().height;
+      float currentSum = 0;
+      int autoCount = 0;
+      for (int r = 0; r < pi.rowSpan; ++r) {
+        currentSum += rowHeights[pi.row + r];
+        const Value &track = rowTracks[pi.row + r];
+        if (track.isAuto() ||
+            (track.kind == Value::Kind::Keyword && track.keyword == "fr")) {
+          autoCount++;
+        }
+      }
+      if (currentSum < itemH) {
+        float diff = itemH - currentSum;
+        if (autoCount > 0) {
+          for (int r = 0; r < pi.rowSpan; ++r) {
+            const Value &track = rowTracks[pi.row + r];
+            if (track.isAuto() ||
+                (track.kind == Value::Kind::Keyword && track.keyword == "fr")) {
+              rowHeights[pi.row + r] += diff / autoCount;
+            }
+          }
+        } else {
+          for (int r = 0; r < pi.rowSpan; ++r) {
+            rowHeights[pi.row + r] += diff / pi.rowSpan;
+          }
+        }
+      }
+    }
+  }
+
+  float fixedAndAutoSum = 0;
+  float frSum = 0;
+  for (int r = 0; r < maxRows; ++r) {
+    if (rowTracks[r].kind == Value::Kind::Keyword &&
+        rowTracks[r].keyword == "fr") {
+      frSum += rowTracks[r].number;
+    } else {
+      fixedAndAutoSum += rowHeights[r];
+    }
+  }
+  Value containerH = ParseValue(box.value("height"));
+  if (containerH.kind == Value::Kind::Px && frSum > 0) {
+    float freeH = containerH.number - fixedAndAutoSum - rowGap * (maxRows - 1);
+    if (freeH < 0) {
+      freeH = 0;
+    }
+    float perFr = freeH / frSum;
+    for (int r = 0; r < maxRows; ++r) {
+      if (rowTracks[r].kind == Value::Kind::Keyword &&
+          rowTracks[r].keyword == "fr") {
+        rowHeights[r] = perFr * rowTracks[r].number;
+      }
+    }
+  }
+
+  std::vector<float> colX(maxCols, d.content.x);
+  float curX = d.content.x;
+  for (int c = 0; c < maxCols; ++c) {
+    colX[c] = curX;
+    curX += colWidths[c] + colGap;
+  }
+
+  std::vector<float> rowY(maxRows, d.content.y);
+  float curY = d.content.y;
+  for (int r = 0; r < maxRows; ++r) {
+    rowY[r] = curY;
+    curY += rowHeights[r] + rowGap;
+  }
+
+  for (auto &pi : placedItems) {
+    float finalX = colX[pi.col];
+    float finalY = rowY[pi.row];
+    float cellW = 0;
+    for (int c = 0; c < pi.colSpan; ++c) {
+      cellW += colWidths[pi.col + c];
+    }
+    cellW += colGap * (pi.colSpan - 1);
+    LayoutItemInCell(*pi.box, finalX, finalY, cellW, cw);
+  }
+
+  if (curY > d.content.y) {
+    d.content.height = curY - d.content.y - rowGap;
+  } else {
+    d.content.height = 0;
+  }
+}
+
+void LayoutGrid(LayoutBox &box, const Dimensions &containing) {
+  CalculateBlockWidth(box, containing);
+  CalculateBlockPosition(box, containing);
+  box.dimensions.content.height = 0;
+  GridChildren(box);
+  CalculateBlockHeight(box);
+}
+
+void FlexChildren(LayoutBox &box) {
+  Dimensions &d = box.dimensions;
+  const float cw = d.content.width;
+
+  std::vector<LayoutBox *> items = FlowItems(box);
+  if (items.empty()) {
+    return;
+  }
+
+  float rowGap, colGap;
+  ResolveGaps(box, cw, rowGap, colGap);
+
+  int n = static_cast<int>(items.size());
+  std::vector<float> outerW(n);
+  std::vector<bool> isAuto(n, false);
+  float fixedSum = 0;
+  int autoCnt = 0;
+  for (int i = 0; i < n; ++i) {
+    SetItemEdges(*items[i], cw);
+    const Dimensions &id = items[i]->dimensions;
+    float horiz = id.margin.left + id.margin.right + id.border.left +
+                  id.border.right + id.padding.left + id.padding.right;
+    Value w = ParseValue(items[i]->value("width"));
+    if (w.kind == Value::Kind::Px) {
+      outerW[i] = w.number + horiz;
+      fixedSum += outerW[i];
+    } else if (w.kind == Value::Kind::Percent) {
+      outerW[i] = w.toPx(cw) + horiz;
+      fixedSum += outerW[i];
+    } else {
+      isAuto[i] = true;
+      autoCnt++;
+      outerW[i] = horiz; // content width filled in below
+    }
+  }
+
+  float totalGap = colGap * (n - 1);
+  float autoContent =
+      autoCnt > 0 ? std::max(0.0f, (cw - fixedSum - totalGap) / autoCnt) : 0;
+  for (int i = 0; i < n; ++i) {
+    if (isAuto[i]) {
+      outerW[i] += autoContent;
+    }
+  }
+
+  std::string wrapVal = ToLower(box.value("flex-wrap"));
+  bool wrap = (wrapVal == "wrap" || wrapVal == "wrap-reverse");
+
+  struct FlexLine {
+    std::vector<int> itemIndices;
+    float occupiedWidth = 0;
+  };
+  std::vector<FlexLine> lines;
+  FlexLine currentLine;
+  for (int i = 0; i < n; ++i) {
+    float itemW = outerW[i];
+    float gap = currentLine.itemIndices.empty() ? 0 : colGap;
+    if (wrap && !currentLine.itemIndices.empty() &&
+        currentLine.occupiedWidth + gap + itemW > cw) {
+      lines.push_back(currentLine);
+      currentLine = FlexLine{};
+    }
+    currentLine.occupiedWidth +=
+        (currentLine.itemIndices.empty() ? 0.0f : colGap) + itemW;
+    currentLine.itemIndices.push_back(i);
+  }
+  if (!currentLine.itemIndices.empty()) {
+    lines.push_back(currentLine);
+  }
+
+  float y = d.content.y;
+  float totalContainerH = 0;
+
+  for (size_t l = 0; l < lines.size(); ++l) {
+    const FlexLine &line = lines[l];
+    int lineN = line.itemIndices.size();
+    float lineW = line.occupiedWidth;
+    float free = std::max(0.0f, cw - lineW);
+
+    std::string justify = ToLower(box.value("justify-content"));
+    float offset = 0, extra = 0;
+    if (justify == "center") {
+      offset = free / 2;
+    } else if (justify == "flex-end" || justify == "end" ||
+               justify == "right") {
+      offset = free;
+    } else if (justify == "space-between" && lineN > 1) {
+      extra = free / (lineN - 1);
+    } else if (justify == "space-around" && lineN > 0) {
+      offset = free / (2 * lineN);
+      extra = free / lineN;
+    } else if (justify == "space-evenly" && lineN > 0) {
+      offset = free / (lineN + 1);
+      extra = free / (lineN + 1);
+    }
+
+    float x = d.content.x + offset;
+    float lineH = 0;
+
+    for (int idx : line.itemIndices) {
+      LayoutItemInCell(*items[idx], x, y, outerW[idx], cw);
+      lineH = std::max(lineH, items[idx]->dimensions.marginBox().height);
+      x += outerW[idx] + colGap + extra;
+    }
+
+    std::string align = ToLower(box.value("align-items"));
+    for (int idx : line.itemIndices) {
+      float itemH = items[idx]->dimensions.marginBox().height;
+      float diff = lineH - itemH;
+      if (diff > 0) {
+        if (align == "center") {
+          YShifter::shift(*items[idx], diff / 2);
+        } else if (align == "flex-end" || align == "end") {
+          YShifter::shift(*items[idx], diff);
+        }
+      }
+    }
+
+    y += lineH + rowGap;
+    totalContainerH += lineH + rowGap;
+  }
+
+  if (totalContainerH > 0) {
+    totalContainerH -= rowGap;
+  }
+  d.content.height = totalContainerH;
+}
+
+void LayoutFlex(LayoutBox &box, const Dimensions &containing) {
+  CalculateBlockWidth(box, containing);
+  CalculateBlockPosition(box, containing);
+  box.dimensions.content.height = 0;
+  FlexChildren(box);
   CalculateBlockHeight(box);
 }
 

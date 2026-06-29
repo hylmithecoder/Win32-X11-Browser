@@ -42,6 +42,9 @@ struct JsValue {
 
 struct JsObject {
   std::map<std::string, JsValue> properties;
+  // Array storage: when isArray is true, `elements` holds the ordered values.
+  std::vector<JsValue> elements;
+  bool isArray = false;
 };
 
 struct JsEnvironment {

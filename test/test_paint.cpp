@@ -42,6 +42,9 @@ static void ColorTests() {
   Check("rgb(1, 2, 3)", Paint::parseColor("rgb(1, 2, 3)", c) && Eq(c, 1, 2, 3));
   Check("rgba(0,0,0,0.5) -> a~128",
         Paint::parseColor("rgba(0,0,0,0.5)", c) && c.a >= 126 && c.a <= 129);
+  Check("rgba w/ space and slash", Paint::parseColor("rgba(255 0 0 / 50%)", c) && Eq(c, 255, 0, 0, 128));
+  Check("hsl(120, 100%, 50%) -> lime", Paint::parseColor("hsl(120, 100%, 50%)", c) && Eq(c, 0, 255, 0, 255));
+  Check("hsla(240, 100%, 50%, 0.8)", Paint::parseColor("hsla(240, 100%, 50%, 0.8)", c) && Eq(c, 0, 0, 255, 204));
   Check("'transparent' rejected", !Paint::parseColor("transparent", c));
   Check("empty rejected", !Paint::parseColor("", c));
   Check("unknown keyword rejected", !Paint::parseColor("notacolor", c));

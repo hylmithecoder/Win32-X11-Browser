@@ -1,4 +1,5 @@
 #include "../include/Browser.hpp"
+#include "../include/Base64.hpp"
 #include "../include/Font.hpp"
 #include "../include/JsEngine.hpp"
 #include "../include/Net.hpp"
@@ -18,6 +19,64 @@ namespace {
 
 const Paint::Color kBlack{0, 0, 0, 255};
 const Paint::Color kWhite{255, 255, 255, 255};
+
+std::string ResolveInheritedPropertyForDomNode(const Wrapper::Node &domNode,
+                                               const std::string &property,
+                                               const Css::Stylesheet &sheet) {
+  Wrapper::Node current = domNode;
+  while (current.valid()) {
+    std::map<std::string, std::string> style =
+        Css::computeStyle(sheet, current);
+    auto it = style.find(property);
+    if (it != style.end() && !it->second.empty()) {
+      return it->second;
+    }
+    current = current.parent();
+  }
+  return "";
+}
+
+int ResolveFontSizeForDomNode(const Wrapper::Node &domNode,
+                              const Css::Stylesheet &sheet, int defaultSize) {
+  std::string fs =
+      ResolveInheritedPropertyForDomNode(domNode, "font-size", sheet);
+  if (fs.empty()) {
+    return defaultSize;
+  }
+
+  const char *start = fs.c_str();
+  char *end = nullptr;
+  double val = std::strtod(start, &end);
+  if (end == start) {
+    return defaultSize;
+  }
+
+  std::string unit = end;
+  size_t first = unit.find_first_not_of(" \t\r\n\f");
+  if (first != std::string::npos) {
+    unit = unit.substr(first);
+  }
+
+  if (unit == "%") {
+    Wrapper::Node parent = domNode.parent();
+    if (parent.valid()) {
+      int parentSize = ResolveFontSizeForDomNode(parent, sheet, 16);
+      return static_cast<int>(val / 100.0f * parentSize);
+    }
+    return static_cast<int>(val / 100.0f * defaultSize);
+  }
+
+  if (unit == "em") {
+    Wrapper::Node parent = domNode.parent();
+    if (parent.valid()) {
+      int parentSize = ResolveFontSizeForDomNode(parent, sheet, 16);
+      return static_cast<int>(val * parentSize);
+    }
+    return static_cast<int>(val * defaultSize);
+  }
+
+  return static_cast<int>(val);
+}
 
 std::string ToLower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -44,6 +103,49 @@ std::string CollapseWhitespace(const std::string &s) {
     out.pop_back();
   }
   return out;
+}
+
+// Lowercased file extension of a URL/path (without the dot), ignoring any
+// query string or fragment. Empty if none.
+std::string UrlExtension(const std::string &url) {
+  std::string u = url;
+  size_t q = u.find_first_of("?#");
+  if (q != std::string::npos) {
+    u = u.substr(0, q);
+  }
+  size_t slash = u.find_last_of('/');
+  std::string name = (slash == std::string::npos) ? u : u.substr(slash + 1);
+  size_t dot = name.find_last_of('.');
+  if (dot == std::string::npos) {
+    return "";
+  }
+  return ToLower(name.substr(dot + 1));
+}
+
+// True for video container extensions we can decode via ffmpeg.
+bool IsVideoExtension(const std::string &ext) {
+  return ext == "mp4" || ext == "webm" || ext == "mkv" || ext == "avi" ||
+         ext == "mov" || ext == "m4v" || ext == "ogv";
+}
+
+// For media/binary resources we cannot render inline, return a human label
+// (e.g. "MP4 video"); empty string means "treat as an HTML document".
+std::string StandaloneMediaLabel(const std::string &ext) {
+  if (IsVideoExtension(ext)) {
+    return ext == "mp4" ? "MP4 video" : (ext + " video");
+  }
+  if (ext == "mp3" || ext == "wav" || ext == "ogg" || ext == "flac" ||
+      ext == "aac" || ext == "m4a") {
+    return ext + " audio";
+  }
+  if (ext == "pdf") {
+    return "PDF document";
+  }
+  if (ext == "zip" || ext == "tar" || ext == "gz" || ext == "rar" ||
+      ext == "7z" || ext == "exe" || ext == "bin" || ext == "iso") {
+    return ext + " file";
+  }
+  return "";
 }
 
 // Rendered text size (pixel height) per tag.
@@ -135,9 +237,24 @@ void FillRect(Paint::Canvas &c, int x, int y, int w, int h, Paint::Color col) {
              col);
 }
 
+// Draw a 1px rectangle outline.
+void StrokeRect(Paint::Canvas &c, int x, int y, int w, int h,
+                Paint::Color col) {
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+  FillRect(c, x, y, w, 1, col);
+  FillRect(c, x, y + h - 1, w, 1, col);
+  FillRect(c, x, y, 1, h, col);
+  FillRect(c, x + w - 1, y, 1, h, col);
+}
+
 } // namespace
 
-Browser::Browser() : m_status("No page loaded") {}
+Browser::Browser() : m_status("No page loaded") {
+  // Try to initialise OpenCL for GPU-accelerated base64. Non-fatal if no GPU.
+  Base64::initOpenCL();
+}
 
 // ---------------------------------------------------------------------------
 // URL handling
@@ -182,6 +299,42 @@ std::string Browser::resolveUrl(const std::string &ref) const {
 
 bool Browser::fetchResource(const std::string &absUrl,
                             std::vector<std::uint8_t> &out) const {
+  // data: URI (e.g. data:image/png;base64,iVBOR...)
+  if (absUrl.rfind("data:", 0) == 0) {
+    // Format: data:[<mediatype>][;base64],<data>
+    size_t comma = absUrl.find(',');
+    if (comma == std::string::npos) {
+      return false;
+    }
+    std::string meta = absUrl.substr(5, comma - 5); // after "data:"
+    std::string payload = absUrl.substr(comma + 1);
+    bool isBase64 = false;
+    // Check for ;base64 in the metadata.
+    size_t semi = meta.find(';');
+    if (semi != std::string::npos) {
+      std::string afterSemi = meta.substr(semi + 1);
+      // Lowercase and trim to check for "base64".
+      std::string lower = afterSemi;
+      std::transform(lower.begin(), lower.end(), lower.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      // Trim whitespace.
+      size_t start = lower.find_first_not_of(" \t\r\n");
+      if (start != std::string::npos) {
+        lower = lower.substr(start);
+      }
+      if (lower == "base64") {
+        isBase64 = true;
+      }
+    }
+    if (isBase64) {
+      out = Base64::decode(payload);
+      return !out.empty();
+    }
+    // Plain data: URI (percent-encoded) -- treat as raw text for now.
+    out.assign(payload.begin(), payload.end());
+    return true;
+  }
+
   if (absUrl.rfind("http://", 0) == 0 || absUrl.rfind("https://", 0) == 0) {
     std::string resp = Net::Get(absUrl);
     if (resp.empty()) {
@@ -231,6 +384,32 @@ bool Browser::navigate(const std::string &url) {
     m_cursorPos = m_urlText.size();
     return false;
   }
+  // Directly-opened video file (e.g. an .mp4): wrap it in a <video> element so
+  // the ffmpeg decode + playback pipeline renders it full width.
+  std::string ext = UrlExtension(target);
+  if (IsVideoExtension(ext)) {
+    std::string page =
+        "<html><head><title>" + target +
+        "</title></head><body style=\"margin:0\">"
+        "<video src=\"" +
+        target + "\" width=\"" +
+        std::to_string(std::max(320, m_lastWidth ? m_lastWidth : 960)) +
+        "\"></video></body></html>";
+    return loadHtml(page, target);
+  }
+
+  // Other media / binary files we cannot render inline (audio/pdf/archives):
+  // show a small placeholder page instead of parsing bytes as HTML.
+  std::string label = StandaloneMediaLabel(ext);
+  if (!label.empty()) {
+    std::string page =
+        "<html><head><title>" + label + "</title></head><body><h1>" + label +
+        "</h1>" + "<p>This file type cannot be displayed yet.</p>" + "<p>" +
+        target + "</p>" + "<p>" + std::to_string(bytes.size()) +
+        " bytes downloaded.</p></body></html>";
+    return loadHtml(page, target);
+  }
+
   std::string html(bytes.begin(), bytes.end());
   return loadHtml(html, target);
 }
@@ -305,18 +484,11 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     if (m_videos.count(abs)) {
       continue;
     }
-    if (abs.size() >= 5 && abs.substr(abs.size() - 5) == ".rawv") {
-      auto fvs = std::make_unique<Video::FileVideoSource>(abs);
-      if (fvs->valid()) {
-        m_videos[abs] = std::move(fvs);
-      } else {
-        m_videos[abs] =
-            std::make_unique<Video::SyntheticVideoSource>(320, 240, 30.0, 300);
-      }
-    } else {
-      m_videos[abs] =
-          std::make_unique<Video::SyntheticVideoSource>(320, 240, 30.0, 300);
-    }
+    // openVideoFile picks ffmpeg for compressed media (mp4/webm/...), the raw
+    // reader for .rawv, and a synthetic preview as a last resort. For http(s)
+    // sources we pass the URL straight to ffmpeg (it has its own protocol
+    // handlers); local paths/file:// are opened directly.
+    m_videos[abs] = Video::openVideoFile(abs);
   }
 
   m_startTime = std::chrono::steady_clock::now();
@@ -347,7 +519,30 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
 
   Js::JsEngine engine(dom);
   for (const Wrapper::Node &script : m_doc.getElementsByTagName("script")) {
-    engine.execute(script.text());
+    // Skip non-JavaScript scripts (e.g. application/json, importmap).
+    std::string type = ToLower(script.attribute("type"));
+    if (!type.empty() && type != "text/javascript" &&
+        type != "application/javascript" && type != "module") {
+      continue;
+    }
+    // External script: fetch the source and execute it; otherwise run the
+    // inline body.
+    std::string src = script.attribute("src");
+    if (!src.empty()) {
+      std::string abs = resolveUrl(src);
+      std::vector<std::uint8_t> data;
+      if (fetchResource(abs, data)) {
+        std::string js(data.begin(), data.end());
+        std::cout << "[JS] Loaded external script: " << abs << " (" << js.size()
+                  << " bytes)" << std::endl;
+        engine.execute(js);
+      } else {
+        std::cout << "[JS] Failed to load external script: " << abs
+                  << std::endl;
+      }
+    } else {
+      engine.execute(script.text());
+    }
   }
 
   return true;
@@ -387,6 +582,21 @@ void Browser::annotateSizes(Layout::StyledNode &node) {
         h = it->second.height;
       }
     }
+    // For <video>, use the decoded source's intrinsic dimensions/aspect ratio.
+    if (name == "video") {
+      auto vit = m_videos.find(resolveUrl(node.node.attribute("src")));
+      if (vit != m_videos.end() && vit->second && vit->second->width() > 0) {
+        int vw = vit->second->width(), vh = vit->second->height();
+        if (w == 0 && h == 0) {
+          w = vw;
+          h = vh;
+        } else if (h == 0 && w > 0) {
+          h = static_cast<int>(static_cast<long long>(w) * vh / vw);
+        } else if (w == 0 && h > 0) {
+          w = static_cast<int>(static_cast<long long>(h) * vw / vh);
+        }
+      }
+    }
     if (w == 0) {
       w = (name == "video") ? 320 : 0;
     }
@@ -399,10 +609,86 @@ void Browser::annotateSizes(Layout::StyledNode &node) {
     if (h > 0) {
       setIfUnset("height", h);
     }
+  } else if (name == "input" || name == "textarea" || name == "select" ||
+             name == "button") {
+    // Form controls are "replaced" elements: give them an intrinsic size and
+    // drop their children so the layout/composite treats them as a single box
+    // (e.g. a <select>'s <option>s must not stack as separate text lines).
+    std::string type = ToLower(node.node.attribute("type"));
+    if (name == "input" && (type == "hidden")) {
+      node.children.clear();
+      return; // no visible box
+    }
+    int w = 0, h = 0;
+    std::string wa = node.node.attribute("width");
+    std::string ha = node.node.attribute("height");
+    if (!wa.empty()) {
+      w = std::atoi(wa.c_str());
+    }
+    if (!ha.empty()) {
+      h = std::atoi(ha.c_str());
+    }
+    int px = 16;
+    int lh = Font::lineHeight(px);
+    if (name == "input" && (type == "checkbox" || type == "radio")) {
+      if (w == 0) {
+        w = 15;
+      }
+      if (h == 0) {
+        h = 15;
+      }
+    } else if (name == "textarea") {
+      int rows = std::atoi(node.node.attribute("rows").c_str());
+      int cols = std::atoi(node.node.attribute("cols").c_str());
+      if (rows <= 0) {
+        rows = 2;
+      }
+      if (cols <= 0) {
+        cols = 20;
+      }
+      if (w == 0) {
+        w = cols * (Font::textWidth("m", px)) + 10;
+      }
+      if (h == 0) {
+        h = rows * lh + 8;
+      }
+    } else if (name == "button" || name == "select" ||
+               (name == "input" &&
+                (type == "submit" || type == "button" || type == "reset"))) {
+      std::string label =
+          (name == "button") ? CollapseWhitespace(node.node.text()) : "";
+      if (label.empty()) {
+        label = node.node.attribute("value");
+      }
+      if (label.empty()) {
+        label = (type == "reset") ? "Reset" : "Submit";
+      }
+      if (w == 0) {
+        w = Font::textWidth(label, px) + 22;
+      }
+      if (h == 0) {
+        h = lh + 10;
+      }
+    } else {
+      // text / search / email / password / number / submit / etc.
+      if (h == 0) {
+        h = lh + 12;
+      }
+      if (w == 0) {
+        int size = std::atoi(node.node.attribute("size").c_str());
+        w = (size > 0) ? size * Font::textWidth("0", px) + 12 : 200;
+      }
+    }
+    setIfUnset("width", w);
+    setIfUnset("height", h);
+    node.children.clear();
+    return;
   } else if (node.children.empty() && node.node.isElement()) {
     // Text-only leaf: give it a line of height so it is visible and stacks.
     if (!CollapseWhitespace(node.node.text()).empty()) {
-      setIfUnset("height", Font::lineHeight(TextSizeFor(name)));
+      int fontSize =
+          ResolveFontSizeForDomNode(node.node, m_sheet, TextSizeFor(name));
+      setIfUnset("height", Font::lineHeight(fontSize));
     }
   }
 
@@ -466,15 +752,94 @@ void Browser::compositeContent(Paint::Canvas &canvas,
                  Paint::Color{0x20, 0x20, 0x20, 255});
         DrawPlayTriangle(canvas, c, kWhite);
       }
+    } else if (name == "input" || name == "textarea" || name == "button" ||
+               name == "select") {
+      std::string type = ToLower(el.attribute("type"));
+      if (!(name == "input" && type == "hidden")) {
+        int x = static_cast<int>(c.x), y = static_cast<int>(c.y);
+        int w = static_cast<int>(c.width), h = static_cast<int>(c.height);
+        Paint::Color border{0x76, 0x76, 0x76, 255};
+        bool isButton = (name == "button" || type == "submit" ||
+                         type == "button" || type == "reset");
+        Paint::Color bg =
+            isButton ? Paint::Color{0xef, 0xef, 0xef, 255} : kWhite;
+        FillRect(canvas, x, y, w, h, bg);
+        StrokeRect(canvas, x, y, w, h, border);
+
+        if (name == "input" && (type == "checkbox" || type == "radio")) {
+          // Draw a filled mark if checked.
+          if (!el.attribute("checked").empty() || el.hasAttribute("checked")) {
+            FillRect(canvas, x + 3, y + 3, w - 6, h - 6,
+                     Paint::Color{0x33, 0x66, 0xcc, 255});
+          }
+        } else {
+          // Determine the text to show and its colour.
+          std::string textToDraw;
+          Paint::Color tcol = kBlack;
+          if (name == "button" || isButton) {
+            textToDraw = CollapseWhitespace(el.text());
+            if (textToDraw.empty()) {
+              textToDraw = el.attribute("value");
+            }
+            if (textToDraw.empty()) {
+              textToDraw = (type == "reset") ? "Reset" : "Submit";
+            }
+          } else if (name == "select") {
+            // Show the first <option>'s text as the selected value.
+            for (const Wrapper::Node &opt : el.getElementsByTagName("option")) {
+              textToDraw = CollapseWhitespace(opt.text());
+              if (!opt.attribute("selected").empty()) {
+                break;
+              }
+              if (!textToDraw.empty()) {
+                break;
+              }
+            }
+          } else {
+            // text/search/etc: value, else placeholder (greyed).
+            std::string val = el.attribute("value");
+            if (name == "textarea") {
+              val = CollapseWhitespace(el.text());
+            }
+            if (!val.empty()) {
+              textToDraw = val;
+              if (type == "password") {
+                textToDraw = std::string(val.size(), '*');
+              }
+            } else {
+              textToDraw = el.attribute("placeholder");
+              tcol = Paint::Color{0x75, 0x75, 0x75, 255};
+            }
+          }
+          if (!textToDraw.empty()) {
+            int px = 16;
+            int ty = y + (h - Font::lineHeight(px)) / 2;
+            Font::drawText(canvas, x + 6, ty, textToDraw, tcol, px);
+          }
+        }
+      }
     } else if (box.children.empty()) {
       std::string text = CollapseWhitespace(el.text());
       if (!text.empty()) {
         Paint::Color col;
-        if (!Paint::parseColor(box.value("color"), col)) {
+        std::string colStr =
+            ResolveInheritedPropertyForDomNode(el, "color", m_sheet);
+        if (colStr.empty() || !Paint::parseColor(colStr, col)) {
           col = kBlack;
         }
-        Font::drawText(canvas, static_cast<int>(c.x), static_cast<int>(c.y),
-                       text, col, TextSizeFor(name));
+        int fontSize =
+            ResolveFontSizeForDomNode(el, m_sheet, TextSizeFor(name));
+        std::string align = ToLower(
+            ResolveInheritedPropertyForDomNode(el, "text-align", m_sheet));
+        int tx = static_cast<int>(c.x);
+        if (align == "center") {
+          int textW = Font::textWidth(text, fontSize);
+          tx += std::max(0, (static_cast<int>(c.width) - textW) / 2);
+        } else if (align == "right") {
+          int textW = Font::textWidth(text, fontSize);
+          tx += std::max(0, static_cast<int>(c.width) - textW);
+        }
+        Font::drawText(canvas, tx, static_cast<int>(c.y), text, col, fontSize);
       }
     }
   }
@@ -561,10 +926,11 @@ Paint::Canvas Browser::render(int width, int height) {
   }
 
   // 1. Run layout with viewport width to determine content height
-  Layout::LayoutBox box = Layout::layout(
-      m_style, static_cast<float>(width), static_cast<float>(pageViewportH));
+  Layout::LayoutBox box = Layout::layout(m_style, static_cast<float>(width),
+                                         static_cast<float>(pageViewportH));
   float contentH = box.dimensions.marginBox().height;
-  int pageCanvasH = std::max(pageViewportH, static_cast<int>(std::ceil(contentH)));
+  int pageCanvasH =
+      std::max(pageViewportH, static_cast<int>(std::ceil(contentH)));
 
   // 2. Render the full page canvas
   Paint::Canvas page = renderPage(width, pageCanvasH);

@@ -88,13 +88,47 @@ set(TestWindowPaint_SRCS ${TEST_SRCS} src/BaseWindow.cpp)
 add_executable(TestWindowPaint test/test_windowpaint.cpp ${TestWindowPaint_SRCS} ${HEADERS})
 target_include_directories(TestWindowPaint PRIVATE include)
 
+# Base64 Test Target (encode/decode with OpenCL GPU path)
+add_executable(TestBase64 test/test_base64.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestBase64 PRIVATE include)
+
+set(ALL_TARGETS ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestAudio TestWindowPaint TestJs TestBase64)
+
 # libxml2 is required by every target (the wrapper is part of the shared
 # sources). Apply its include dirs and libraries uniformly.
-foreach(_target ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestAudio TestWindowPaint TestJs)
+foreach(_target ${ALL_TARGETS})
     target_include_directories(${_target} PRIVATE ${LIBXML2_INCLUDE_DIRS})
     target_link_libraries(${_target} PRIVATE ${LIBXML2_LIBRARIES})
     target_compile_options(${_target} PRIVATE ${LIBXML2_CFLAGS_OTHER})
 endforeach()
+
+# FFmpeg (libav*) for real video decoding. Optional: if not found (e.g. some
+# cross toolchains), Video.cpp falls back to the synthetic source. The video
+# decode path lives in src/Video.cpp behind DWV_HAVE_FFMPEG, which is part of
+# the shared sources, so apply to every target when available.
+pkg_check_modules(LIBAV IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
+if(LIBAV_FOUND)
+    message(STATUS "FFmpeg found: enabling video decode (DWV_HAVE_FFMPEG)")
+    foreach(_target ${ALL_TARGETS})
+        target_include_directories(${_target} PRIVATE ${LIBAV_INCLUDE_DIRS})
+        target_link_libraries(${_target} PRIVATE PkgConfig::LIBAV)
+        target_compile_definitions(${_target} PRIVATE DWV_HAVE_FFMPEG)
+    endforeach()
+else()
+    message(STATUS "FFmpeg not found: video falls back to synthetic source")
+endif()
+
+# Find OpenCL (optional): GPU-accelerated base64 encode/decode.
+find_package(OpenCL QUIET)
+if(OpenCL_FOUND)
+    message(STATUS "OpenCL found: enabling GPU base64 (DWV_HAVE_OPENCL)")
+    foreach(_target ${ALL_TARGETS})
+        target_link_libraries(${_target} PRIVATE OpenCL::OpenCL)
+        target_compile_definitions(${_target} PRIVATE DWV_HAVE_OPENCL)
+    endforeach()
+else()
+    message(STATUS "OpenCL not found: base64 uses CPU fallback")
+endif()
 
 if(WIN32)
     # Windows native or cross-compilation using MinGW
@@ -122,7 +156,7 @@ if(WIN32)
     endforeach()
 
     # Links for the plain test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs)
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs TestBase64)
         target_link_libraries(${_target} PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32)
         target_link_options(${_target} PRIVATE ${WIN_LINK_OPTIONS})
     endforeach()
@@ -145,7 +179,7 @@ else()
     endforeach()
 
     # Links for the plain test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs)
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs TestBase64)
         target_include_directories(${_target} PRIVATE ${OpenSSL_INCLUDE_DIRS})
         target_link_libraries(${_target} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     endforeach()
