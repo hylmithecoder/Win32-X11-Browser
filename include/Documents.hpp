@@ -40,6 +40,12 @@ bool renderPdfPage(const std::vector<std::uint8_t> &data, int pageNum,
 bool renderPdfToBitmap(const std::vector<std::uint8_t> &data,
                        Image::Bitmap &out, int pageNum = 0);
 
+bool renderAllPdfPages(const std::vector<std::uint8_t> &data,
+                       Image::Bitmap &out, double scale = 1.0);
+
+bool pdfPageSizes(const std::vector<std::uint8_t> &data,
+                  std::vector<std::pair<double, double>> &sizes);
+
 PdfMetadata pdfMetadata(const std::vector<std::uint8_t> &data);
 
 } // namespace Documents

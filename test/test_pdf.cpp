@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <vector>
 
 int main() {
@@ -105,6 +106,37 @@ int main() {
   } else {
     DEBUG_LOG("  [FAIL] pdfMetadata should be empty for minimal PDF");
     ++failed;
+  }
+
+  // -------------------------------------------------------------------------
+  // Real-file smoke test (optional — skip if file not present)
+  // -------------------------------------------------------------------------
+  {
+    const char *realPath =
+        "/srv/http/Abdullah Farras Al Faiq - MODUL 1 PBO UAS.pdf";
+    std::ifstream rf(realPath, std::ios::binary);
+    if (rf) {
+      std::vector<std::uint8_t> rdata((std::istreambuf_iterator<char>(rf)),
+                                      std::istreambuf_iterator<char>());
+      int rpages = DesktopWebview::Documents::pdfPageCount(rdata);
+      DEBUG_LOG("  [INFO] Real PDF: %d pages", rpages);
+      if (rpages > 0) {
+        DesktopWebview::Documents::PageBitmap rbmp;
+        bool rok = DesktopWebview::Documents::renderPdfPage(rdata, 0, rbmp);
+        if (rok && rbmp.width > 0 && rbmp.height > 0) {
+          DEBUG_LOG("  [PASS] Real PDF page 0 rendered: %dx%d", rbmp.width,
+                    rbmp.height);
+        } else {
+          DEBUG_LOG("  [FAIL] Real PDF page 0 render failed");
+          ++failed;
+        }
+      } else {
+        DEBUG_LOG("  [FAIL] Real PDF has 0 pages");
+        ++failed;
+      }
+    } else {
+      DEBUG_LOG("  [SKIP] Real PDF not found at %s", realPath);
+    }
   }
 
   printf("\n==========================================================\n");

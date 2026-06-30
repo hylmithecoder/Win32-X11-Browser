@@ -139,6 +139,12 @@ private:
   // Decoded resources keyed by absolute URL.
   std::map<std::string, Image::Bitmap> m_images;
 
+  // Raw PDF file data (cached).
+  std::vector<std::uint8_t> m_pdfBytes;
+
+  // Cached individual PDF pages.
+  std::map<int, Image::Bitmap> m_pdfPages;
+
   // Decoded videos keyed by absolute URL.
   std::map<std::string, std::unique_ptr<Video::VideoSource>> m_videos;
 

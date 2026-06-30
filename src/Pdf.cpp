@@ -212,6 +212,22 @@ public:
       }
     }
 
+    // Read bare word/keyword/operator
+    size_t start = pos;
+    while (pos < sz) {
+      char c2 = static_cast<char>(d[pos]);
+      if (std::strchr(" \n\r\t\f/<>[](){}%", c2)) {
+        break;
+      }
+      pos++;
+    }
+    if (pos > start) {
+      Object o;
+      o.kind = Kind::kName;
+      o.s = std::string(reinterpret_cast<const char *>(d + start), pos - start);
+      return o;
+    }
+
     pos++;
     return {};
   }
@@ -500,123 +516,196 @@ struct TextSpan {
   double fontSize;
 };
 
+// PDF content stream token — operator or operand.
+struct ContentToken {
+  enum { Operand, Operator } type;
+  Object obj;
+  std::string op;
+};
+
 static std::vector<TextSpan>
 ParseText(const std::vector<std::uint8_t> &stream) {
-  struct Token {
-    enum { Operand, Operator } type;
-    Object obj;
-    std::string op;
-  };
-  std::vector<Token> toks;
 
-  // Known PDF content-stream operators
+  // Known multi-char PDF content-stream operator names
   auto isOp = [](const std::string &s) -> bool {
-    static const char *ops[] = {"BT",  "ET",  "Tf",  "Td",  "TD",
-                                "Tm",  "Tj",  "TJ",  "T*",  "TL",
-                                "Tr",  "Ts",  "Tw",  "Tc",  "Tz",
-                                "q",   "Q",   "cm",  "w",   "J",
-                                "j",   "M",   "d",   "S",   "s",
-                                "f",   "F",   "B",   "b",   "n",
-                                "W",   "h",   "m",   "l",   "c",
-                                "v",   "y",   "re",  "n",   "W",
-                                "f*",  "B*",  "b*",  "Do",  "CS",
-                                "cs",  "SC",  "sc",  "SCN", "scn",
-                                "G",   "g",   "RG",  "rg",  "K",
-                                "k",   "ri",  "i",   "gs",  "sh",
-                                "MP",  "DP",  "BMC", "BDC", "EMC",
-                                "Tl",  "0",   nullptr};
+    static const char *ops[] = {
+        "BT", "ET",  "Tf",  "Td",  "TD", "Tm", "TJ", "Tj",  "T*",   "TL",
+        "Tr", "Ts",  "Tw",  "Tc",  "Tz", "q",  "Q",  "cm",  "w",    "J",
+        "j",  "M",   "d",   "S",   "s",  "f",  "F",  "B",   "b",    "n",
+        "W",  "h",   "m",   "l",   "c",  "v",  "y",  "re",  "f*",   "B*",
+        "b*", "W*",  "Do",  "CS",  "cs", "SC", "sc", "SCN", "scn",  "G",
+        "g",  "RG",  "rg",  "K",   "k",  "ri", "i",  "gs",  "sh",   "MP",
+        "DP", "BMC", "BDC", "EMC", "BX", "EX", "'",  "\"",  nullptr};
     for (int i = 0; ops[i]; ++i)
       if (s == ops[i])
         return true;
     return false;
   };
 
+  std::vector<ContentToken> toks;
   Tokeniser ts(stream.data(), stream.size());
+
   while (!ts.eof()) {
     Object o = ts.read();
     if (o.kind == Kind::kNull)
       break;
+
     if (o.kind == Kind::kName) {
       std::string name = o.s;
+      // Remove leading '/' so "/BT" → "BT"
       if (!name.empty() && name[0] == '/')
         name = name.substr(1);
-      Token t;
+      ContentToken t;
       if (isOp(name)) {
-        t.type = Token::Operator;
+        t.type = ContentToken::Operator;
         t.op = std::move(name);
       } else {
-        t.type = Token::Operand;
+        // Not a recognised operator: treat as name operand (e.g. /F1 in Tf)
+        t.type = ContentToken::Operand;
         t.obj = std::move(o);
       }
       toks.push_back(std::move(t));
     } else {
-      Token t;
-      t.type = Token::Operand;
+      ContentToken t;
+      t.type = ContentToken::Operand;
       t.obj = std::move(o);
       toks.push_back(std::move(t));
     }
   }
 
+  // ---- Stack Machine State -------------------------------------------------
   std::vector<TextSpan> out;
-  double tx = 0, ty = 0, fontSize = 12, leading = 14;
+  std::vector<const Object *> stack;
+
+  double tm_tx = 0, tm_ty = 0; // current text position (from Tm)
+  double lm_tx = 0, lm_ty = 0; // line matrix position
+  double fontSize = 12;
+  double leading = 0;
+
+  // Pop helper to safely extract count elements in forward order
+  auto pop = [&](int count) -> std::vector<const Object *> {
+    std::vector<const Object *> popped;
+    popped.reserve(count);
+    int available = std::min(count, static_cast<int>(stack.size()));
+    int nulls = count - available;
+    for (int k = 0; k < nulls; ++k) {
+      popped.push_back(nullptr);
+    }
+    if (available > 0) {
+      popped.insert(popped.end(), stack.end() - available, stack.end());
+      stack.erase(stack.end() - available, stack.end());
+    }
+    return popped;
+  };
 
   for (size_t i = 0; i < toks.size(); ++i) {
-    if (toks[i].type != Token::Operator)
+    if (toks[i].type == ContentToken::Operand) {
+      stack.push_back(&toks[i].obj);
       continue;
+    }
+
     const std::string &op = toks[i].op;
 
     if (op == "BT") {
-      tx = 0;
-      ty = 0;
+      tm_tx = 0;
+      tm_ty = 0;
+      lm_tx = 0;
+      lm_ty = 0;
+      stack.clear();
+    } else if (op == "ET") {
+      stack.clear();
+    } else if (op == "TL") {
+      auto args = pop(1);
+      if (args[0])
+        leading = GetNum(*args[0]);
     } else if (op == "Tf") {
-      if (i >= 1 && toks[i - 1].type == Token::Operand)
-        fontSize = GetNum(toks[i - 1].obj);
-    } else if (op == "Td" || op == "TD") {
-      if (i >= 2) {
-        tx += GetNum(toks[i - 2].obj);
-        ty += GetNum(toks[i - 1].obj);
-        if (op == "TD")
-          leading = -GetNum(toks[i - 1].obj);
+      auto args = pop(2); // fontName, fontSize
+      if (args[1])
+        fontSize = GetNum(*args[1]);
+      if (fontSize <= 0)
+        fontSize = 12;
+    } else if (op == "Td") {
+      auto args = pop(2); // tx, ty
+      if (args[0] && args[1]) {
+        lm_tx += GetNum(*args[0]);
+        lm_ty += GetNum(*args[1]);
+        tm_tx = lm_tx;
+        tm_ty = lm_ty;
       }
-    } else if (op == "Tj") {
-      if (i >= 1 && toks[i - 1].type == Token::Operand) {
-        const Object &o = toks[i - 1].obj;
-        if (o.kind == Kind::kStr) {
-          out.push_back({o.s, tx, ty, fontSize});
-        }
-      }
-    } else if (op == "TJ") {
-      if (i >= 1 && toks[i - 1].type == Token::Operand) {
-        const Object &o = toks[i - 1].obj;
-        if (o.kind == Kind::kArray) {
-          std::string combined;
-          for (const Object &e : o.arr)
-            if (e.kind == Kind::kStr)
-              combined += e.s;
-          if (!combined.empty())
-            out.push_back({combined, tx, ty, fontSize});
-        }
-      }
-    } else if (op == "'") {
-      tx = 0;
-      ty -= leading;
-      if (i >= 1 && toks[i - 1].type == Token::Operand) {
-        const Object &o = toks[i - 1].obj;
-        if (o.kind == Kind::kStr)
-          out.push_back({o.s, tx, ty, fontSize});
-      }
-    } else if (op == "\"") {
-      tx = 0;
-      ty -= leading;
-      if (i >= 3 && toks[i - 1].type == Token::Operand) {
-        const Object &o = toks[i - 1].obj;
-        if (o.kind == Kind::kStr)
-          out.push_back({o.s, tx, ty, fontSize});
+    } else if (op == "TD") {
+      auto args = pop(2); // tx, ty
+      if (args[0] && args[1]) {
+        double dx = GetNum(*args[0]);
+        double dy = GetNum(*args[1]);
+        leading = -dy;
+        lm_tx += dx;
+        lm_ty += dy;
+        tm_tx = lm_tx;
+        tm_ty = lm_ty;
       }
     } else if (op == "Tm") {
-      if (i >= 6) {
-        tx = GetNum(toks[i - 2].obj);
-        ty = GetNum(toks[i - 1].obj);
+      auto args = pop(6); // a, b, c, d, e, f
+      if (args[4] && args[5]) {
+        tm_tx = GetNum(*args[4]);
+        tm_ty = GetNum(*args[5]);
+        lm_tx = tm_tx;
+        lm_ty = tm_ty;
+      }
+    } else if (op == "T*") {
+      lm_ty -= leading;
+      lm_tx = 0;
+      tm_tx = lm_tx;
+      tm_ty = lm_ty;
+    } else if (op == "Tj") {
+      auto args = pop(1);
+      if (args[0] && args[0]->kind == Kind::kStr && !args[0]->s.empty()) {
+        out.push_back({args[0]->s, tm_tx, tm_ty, fontSize});
+      }
+    } else if (op == "TJ") {
+      auto args = pop(1);
+      if (args[0] && args[0]->kind == Kind::kArray) {
+        std::string combined;
+        double xAdj = 0.0;
+        for (const Object &elem : args[0]->arr) {
+          if (elem.kind == Kind::kStr) {
+            combined += elem.s;
+          } else if (elem.kind == Kind::kInt || elem.kind == Kind::kReal) {
+            xAdj += GetNum(elem);
+          }
+        }
+        if (!combined.empty()) {
+          out.push_back({combined, tm_tx, tm_ty, fontSize});
+        }
+        tm_tx -= xAdj * fontSize / 1000.0;
+      }
+    } else if (op == "'") {
+      lm_ty -= leading;
+      lm_tx = 0;
+      tm_tx = lm_tx;
+      tm_ty = lm_ty;
+      auto args = pop(1);
+      if (args[0] && args[0]->kind == Kind::kStr && !args[0]->s.empty()) {
+        out.push_back({args[0]->s, tm_tx, tm_ty, fontSize});
+      }
+    } else if (op == "\"") {
+      auto args = pop(3); // aw, ac, string
+      lm_ty -= leading;
+      lm_tx = 0;
+      tm_tx = lm_tx;
+      tm_ty = lm_ty;
+      if (args[2] && args[2]->kind == Kind::kStr && !args[2]->s.empty()) {
+        out.push_back({args[2]->s, tm_tx, tm_ty, fontSize});
+      }
+    } else {
+      // Ignored non-text operators: pop their operands if we know the count
+      // to keep stack reasonably clean, though Tj/TJ are robust anyway.
+      if (op == "g" || op == "G" || op == "gs" || op == "w" || op == "cs" ||
+          op == "CS") {
+        pop(1);
+      } else if (op == "rg" || op == "RG") {
+        pop(3);
+      } else if (op == "cm" || op == "re") {
+        pop(6);
       }
     }
   }
@@ -874,7 +963,8 @@ static bool BuildPdf(const std::vector<std::uint8_t> &data, PdfData &pdf) {
               static_cast<int>(body.stream.size()), &outLen);
           if (decoded && outLen > 0) {
             body.stream.assign(reinterpret_cast<std::uint8_t *>(decoded),
-                               reinterpret_cast<std::uint8_t *>(decoded) + outLen);
+                               reinterpret_cast<std::uint8_t *>(decoded) +
+                                   outLen);
             free(decoded);
           }
         }
@@ -963,21 +1053,11 @@ static bool BuildPdf(const std::vector<std::uint8_t> &data, PdfData &pdf) {
 }
 
 // =========================================================================
-// Public API
+// Internal helper: render one page into a canvas given a pre-built PdfData
 // =========================================================================
 
-int pdfPageCount(const std::vector<std::uint8_t> &data) {
-  PdfData pdf;
-  if (!BuildPdf(data, pdf))
-    return 0;
-  return static_cast<int>(pdf.pageRefs.size());
-}
-
-bool renderPdfPage(const std::vector<std::uint8_t> &data, int pageNum,
-                   PageBitmap &out) {
-  PdfData pdf;
-  if (!BuildPdf(data, pdf))
-    return false;
+static bool RenderPageFromData(const PdfData &pdf, int pageNum, double scale,
+                               PageBitmap &out) {
   if (pageNum < 0 || pageNum >= static_cast<int>(pdf.pageRefs.size()))
     return false;
 
@@ -987,19 +1067,36 @@ bool renderPdfPage(const std::vector<std::uint8_t> &data, int pageNum,
   if (!pageObj)
     return false;
 
-  double pageW = pdf.defaultW;
-  double pageH = pdf.defaultH;
+  // MediaBox: [llx lly urx ury]  — width = urx-llx, height = ury-lly
+  double llx = 0, lly = 0, urx = pdf.defaultW, ury = pdf.defaultH;
   const Object *mb = DictFind(*pageObj, "MediaBox");
   if (mb && mb->kind == Kind::kArray && mb->arr.size() >= 4) {
-    pageW = GetNum(mb->arr[2]);
-    pageH = GetNum(mb->arr[3]);
+    llx = GetNum(mb->arr[0]);
+    lly = GetNum(mb->arr[1]);
+    urx = GetNum(mb->arr[2]);
+    ury = GetNum(mb->arr[3]);
   }
-  if (pageW < 1 || pageH < 1) {
-    pageW = 612;
-    pageH = 792;
-  }
+  double pageW = urx - llx;
+  double pageH = ury - lly;
+  if (pageW < 1)
+    pageW = pdf.defaultW;
+  if (pageH < 1)
+    pageH = pdf.defaultH;
 
-  // Get content stream(s)
+  // Auto-scale so no dimension exceeds kMaxDim at scale=1, then apply caller
+  // scale on top.  We clamp renderW/H to avoid enormous allocations.
+  const int kMaxDim = 1400;
+  double autoScale = 1.0;
+  if (pageW * scale > kMaxDim || pageH * scale > kMaxDim) {
+    autoScale = std::min(static_cast<double>(kMaxDim) / (pageW * scale),
+                         static_cast<double>(kMaxDim) / (pageH * scale));
+  }
+  double finalScale = scale * autoScale;
+
+  int renderW = std::max(1, static_cast<int>(std::ceil(pageW * finalScale)));
+  int renderH = std::max(1, static_cast<int>(std::ceil(pageH * finalScale)));
+
+  // Collect content stream(s)
   std::vector<std::uint8_t> contentStream;
   const Object *contents = DictFind(*pageObj, "Contents");
   if (contents) {
@@ -1016,50 +1113,87 @@ bool renderPdfPage(const std::vector<std::uint8_t> &data, int pageNum,
           Object r = MakeRef(item.ref);
           const Object *resolved = Resolve(pdf.objs, &r);
           if (resolved && resolved->kind == Kind::kStream) {
-            auto &s = resolved->stream;
+            const auto &s = resolved->stream;
             contentStream.insert(contentStream.end(), s.begin(), s.end());
+            // Add a whitespace separator between concatenated streams
+            contentStream.push_back(' ');
           }
         }
       }
     }
   }
 
-  // Extract and render text
+  // Parse text spans from content stream
   std::vector<TextSpan> spans;
+  DEBUG_LOG("[PDF] page %d: contentStream=%zu bytes, "
+            "mediaBox=[%.1f,%.1f,%.1f,%.1f], canvas=%dx%d",
+            pageNum, contentStream.size(), llx, lly, urx, ury, renderW,
+            renderH);
   if (!contentStream.empty())
     spans = ParseText(contentStream);
-
-  int renderW = static_cast<int>(pageW);
-  int renderH = static_cast<int>(pageH);
-  const int kMaxDim = 1200;
-  double scale = 1.0;
-  if (renderW > kMaxDim || renderH > kMaxDim) {
-    scale = std::min(static_cast<double>(kMaxDim) / renderW,
-                     static_cast<double>(kMaxDim) / renderH);
-    renderW = static_cast<int>(renderW * scale);
-    renderH = static_cast<int>(renderH * scale);
+  DEBUG_LOG("[PDF] page %d: parsed %zu text spans", pageNum, spans.size());
+  if (!spans.empty()) {
+    DEBUG_LOG("[PDF]   first span: '%s' tx=%.1f ty=%.1f fs=%.1f",
+              spans[0].text.substr(0, 20).c_str(), spans[0].tx, spans[0].ty,
+              spans[0].fontSize);
   }
 
   Paint::Canvas canvas(renderW, renderH);
   canvas.clear(Paint::Color{255, 255, 255, 255});
 
   for (const TextSpan &sp : spans) {
-    double x = sp.tx * scale;
-    double y = (pageH - sp.ty) * scale - sp.fontSize * scale;
-    if (y < 0)
-      y = 0;
-    if (y >= renderH)
+    if (sp.text.empty())
+      continue;
+    if (sp.fontSize <= 0)
       continue;
 
-    int fs = std::max(8, static_cast<int>(sp.fontSize * scale));
-    Font::drawText(canvas, static_cast<int>(x), static_cast<int>(y), sp.text,
+    // PDF coordinate system: origin bottom-left, Y increases upward.
+    // Canvas coordinate system: origin top-left, Y increases downward.
+    // Transform: canvas_y = (pageH - (sp.ty - lly)) * finalScale -
+    // fontSize*finalScale
+    double canvasX = (sp.tx - llx) * finalScale;
+    double canvasY = (ury - sp.ty) * finalScale - sp.fontSize * finalScale;
+
+    // Clamp to canvas bounds (with a small margin to not clip ascenders)
+    if (canvasX < 0)
+      canvasX = 0;
+    if (canvasY < -sp.fontSize * finalScale)
+      continue; // fully above top
+    if (canvasY >= renderH)
+      continue; // below bottom
+    if (canvasX >= renderW)
+      continue; // past right edge
+
+    int fs =
+        std::max(6, static_cast<int>(std::round(sp.fontSize * finalScale)));
+    Font::drawText(canvas, static_cast<int>(std::round(canvasX)),
+                   static_cast<int>(std::round(canvasY)), sp.text,
                    Paint::Color{0, 0, 0, 255}, fs);
   }
 
   out.width = renderW;
   out.height = renderH;
   out.pixels = canvas.pixels();
-  return true;
+  return out.valid() || (renderW > 0 && renderH > 0);
+}
+
+// =========================================================================
+// Public API
+// =========================================================================
+
+int pdfPageCount(const std::vector<std::uint8_t> &data) {
+  PdfData pdf;
+  if (!BuildPdf(data, pdf))
+    return 0;
+  return static_cast<int>(pdf.pageRefs.size());
+}
+
+bool renderPdfPage(const std::vector<std::uint8_t> &data, int pageNum,
+                   PageBitmap &out) {
+  PdfData pdf;
+  if (!BuildPdf(data, pdf))
+    return false;
+  return RenderPageFromData(pdf, pageNum, 1.0, out);
 }
 
 bool renderPdfToBitmap(const std::vector<std::uint8_t> &data,
@@ -1070,7 +1204,93 @@ bool renderPdfToBitmap(const std::vector<std::uint8_t> &data,
   out.width = pb.width;
   out.height = pb.height;
   out.pixels = std::move(pb.pixels);
-  return out.valid();
+  // Valid if pixel buffer has the right size; white blank pages are also valid.
+  return out.width > 0 && out.height > 0 &&
+         out.pixels.size() == static_cast<size_t>(out.width) * out.height;
+}
+
+bool renderAllPdfPages(const std::vector<std::uint8_t> &data,
+                       Image::Bitmap &out, double scale) {
+  PdfData pdf;
+  if (!BuildPdf(data, pdf))
+    return false;
+  int nPages = static_cast<int>(pdf.pageRefs.size());
+  if (nPages == 0)
+    return false;
+
+  // Render all pages and stack them vertically
+  std::vector<PageBitmap> pages;
+  pages.reserve(nPages);
+  int totalH = 0;
+  int maxW = 0;
+  const int kPageGap = 8; // pixels between pages
+
+  for (int p = 0; p < nPages; ++p) {
+    PageBitmap pb;
+    if (RenderPageFromData(pdf, p, scale, pb) && pb.width > 0 &&
+        pb.height > 0) {
+      totalH += pb.height;
+      if (p + 1 < nPages)
+        totalH += kPageGap;
+      maxW = std::max(maxW, pb.width);
+      pages.push_back(std::move(pb));
+    }
+  }
+
+  if (pages.empty() || maxW <= 0 || totalH <= 0)
+    return false;
+
+  // Composite all pages into one tall bitmap, centred horizontally
+  out.width = maxW;
+  out.height = totalH;
+  out.pixels.assign(static_cast<size_t>(maxW) * totalH,
+                    Paint::Color{0xcc, 0xcc, 0xcc, 255}); // grey gap
+
+  int yOff = 0;
+  for (const PageBitmap &pb : pages) {
+    int xOff = (maxW - pb.width) / 2; // centre narrower pages
+    for (int py = 0; py < pb.height; ++py) {
+      for (int px = 0; px < pb.width; ++px) {
+        size_t srcIdx = static_cast<size_t>(py) * pb.width + px;
+        size_t dstIdx = static_cast<size_t>(yOff + py) * maxW + xOff + px;
+        out.pixels[dstIdx] = pb.pixels[srcIdx];
+      }
+    }
+    yOff += pb.height + kPageGap;
+  }
+
+  return true;
+}
+
+bool pdfPageSizes(const std::vector<std::uint8_t> &data,
+                  std::vector<std::pair<double, double>> &sizes) {
+  PdfData pdf;
+  if (!BuildPdf(data, pdf))
+    return false;
+  sizes.reserve(pdf.pageRefs.size());
+  for (size_t i = 0; i < pdf.pageRefs.size(); ++i) {
+    Ref pageRef = pdf.pageRefs[i];
+    Object refObj = MakeRef(pageRef);
+    const Object *pageObj = Resolve(pdf.objs, &refObj);
+    double llx = 0, lly = 0, urx = pdf.defaultW, ury = pdf.defaultH;
+    if (pageObj) {
+      const Object *mb = DictFind(*pageObj, "MediaBox");
+      if (mb && mb->kind == Kind::kArray && mb->arr.size() >= 4) {
+        llx = GetNum(mb->arr[0]);
+        lly = GetNum(mb->arr[1]);
+        urx = GetNum(mb->arr[2]);
+        ury = GetNum(mb->arr[3]);
+      }
+    }
+    double w = urx - llx;
+    double h = ury - lly;
+    if (w < 1)
+      w = pdf.defaultW;
+    if (h < 1)
+      h = pdf.defaultH;
+    sizes.push_back({w, h});
+  }
+  return true;
 }
 
 PdfMetadata pdfMetadata(const std::vector<std::uint8_t> &data) {

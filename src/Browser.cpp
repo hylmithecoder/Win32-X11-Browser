@@ -231,7 +231,7 @@ const FileTypeInfo *LookupFileType(const std::string &ext) {
       {"ico", {"Icon", "image/x-icon", "#ffffff", true}},
       {"svg", {"SVG image", "image/svg+xml", "#ffffff", true}},
 
-      {"pdf", {"PDF document", "application/pdf", "#ffffff", false}},
+      {"pdf", {"PDF document", "application/pdf", "#ffffff", true}},
       {"zip", {"ZIP archive", "application/zip", "#333333", false}},
       {"tar", {"TAR archive", "application/x-tar", "#333333", false}},
       {"gz", {"GZip archive", "application/gzip", "#333333", false}},
@@ -586,27 +586,48 @@ bool Browser::navigate(const std::string &url) {
     return loadHtml(page, target);
   }
 
-  // PDF: render the first page to a bitmap and display as an <img>.
+  // PDF: render all pages into one tall bitmap and display as an <img>.
   if (ext == "pdf") {
-    Image::Bitmap bmp;
-    if (Documents::renderPdfToBitmap(bytes, bmp, 0)) {
-      std::vector<std::uint8_t> bmpFile = EncodeBmp(bmp);
-      std::string dataUri = "data:image/bmp;base64," +
-                            Base64::encode(bmpFile.data(), bmpFile.size());
-      int totalPages = Documents::pdfPageCount(bytes);
+    m_pdfBytes = bytes;
+    m_pdfPages.clear();
+    std::vector<std::pair<double, double>> sizes;
+    if (Documents::pdfPageSizes(bytes, sizes) && !sizes.empty()) {
+      int totalPages = static_cast<int>(sizes.size());
+      std::string pageInfo = std::to_string(totalPages) + " halaman";
+      std::string imagesHtml;
+      for (int i = 0; i < totalPages; ++i) {
+        int w = static_cast<int>(std::round(sizes[i].first));
+        int h = static_cast<int>(std::round(sizes[i].second));
+        imagesHtml += "<img src=\"pdf://page/" + std::to_string(i) +
+                      "\" width=\"" + std::to_string(w) +
+                      "\" height=\"" + std::to_string(h) +
+                      "\" style=\"margin-bottom:8px;\">";
+      }
       std::string page =
           "<html><head><title>" + target +
           "</title>"
-          "<style>body{margin:0;background:#ccc;text-align:center;"
-          "font-family:sans-serif;font-size:13px;color:#333;}"
-          "img{display:block;margin:0 auto;}</style>"
+          "<style>"
+          "*{box-sizing:border-box;margin:0;padding:0}"
+          "body{background:#808080;font-family:sans-serif;font-size:13px;}"
+          ".toolbar{position:sticky;top:0;z-index:10;background:#f0f0f0;"
+          "border-bottom:1px solid #999;padding:6px 12px;display:flex;"
+          "align-items:center;gap:12px;color:#333;}"
+          ".toolbar .info{flex:1;overflow:hidden;text-overflow:ellipsis;"
+          "white-space:nowrap;}"
+          ".pdf-wrap{display:flex;flex-direction:column;align-items:center;"
+          "padding:12px 0 24px;}"
+          "img{display:block;box-shadow:0 2px 8px rgba(0,0,0,0.5);}"
+          "</style>"
           "</head><body>"
-          "<div style=\"padding:6px;background:#f5f5f5;border-bottom:1px "
-          "solid #aaa;\">" +
-          std::to_string(totalPages) + " halaman &mdash; " + target +
+          "<div class=\"toolbar\">"
+          "<span class=\"info\">" +
+          pageInfo + " &mdash; " + target +
+          "</span>"
           "</div>"
-          "<img src=\"" +
-          dataUri + "\"></body></html>";
+          "<div class=\"pdf-wrap\">" +
+          imagesHtml +
+          "</div>"
+          "</body></html>";
       return loadHtml(page, target);
     }
     // Fall through to generic unknown-file handler below.
@@ -721,6 +742,12 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   }
   m_cursorPos = m_urlText.size();
 
+  // Release PDF image memory if we are navigating away from the PDF viewer
+  if (html.find("pdf://page/") == std::string::npos) {
+    m_pdfBytes.clear();
+    m_pdfPages.clear();
+  }
+
   // Stylesheet = UA defaults (assets/ua.css) + link stylesheets + <style>
   // element's text.
   std::string css = LoadUaCss();
@@ -750,7 +777,7 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   auto preload = [&](const std::string &attr, const char *tag) {
     for (const Wrapper::Node &el : m_doc.getElementsByTagName(tag)) {
       std::string src = el.attribute(attr);
-      if (src.empty()) {
+      if (src.empty() || src.rfind("pdf://", 0) == 0) {
         continue;
       }
       std::string abs = resolveUrl(src);
@@ -879,13 +906,16 @@ void Browser::annotateSizes(Layout::StyledNode &node) {
     }
     // Fall back to the decoded image's intrinsic size.
     std::string srcAttr = (name == "img") ? "src" : "poster";
-    auto it = m_images.find(resolveUrl(node.node.attribute(srcAttr)));
-    if (it != m_images.end() && it->second.valid()) {
-      if (w == 0) {
-        w = it->second.width;
-      }
-      if (h == 0) {
-        h = it->second.height;
+    std::string srcVal = node.node.attribute(srcAttr);
+    if (srcVal.rfind("pdf://", 0) == std::string::npos) {
+      auto it = m_images.find(resolveUrl(srcVal));
+      if (it != m_images.end() && it->second.valid()) {
+        if (w == 0) {
+          w = it->second.width;
+        }
+        if (h == 0) {
+          h = it->second.height;
+        }
       }
     }
     // For <video>, use the decoded source's intrinsic dimensions/aspect ratio.
@@ -1015,14 +1045,35 @@ void Browser::compositeContent(Paint::Canvas &canvas,
     const Layout::Rect &c = box.dimensions.content;
 
     if (name == "img") {
-      auto it = m_images.find(resolveUrl(el.attribute("src")));
-      if (it != m_images.end() && it->second.valid()) {
-        BlitScaled(canvas, it->second, c);
+      std::string srcVal = el.attribute("src");
+      if (srcVal.rfind("pdf://page/", 0) == 0) {
+        int pageNum = std::atoi(srcVal.c_str() + 11);
+        float viewportTop = m_scrollY;
+        float viewportBottom = m_scrollY + static_cast<float>(m_lastHeight - kBrowserHeight);
+        // Only render and blit if the page intersects the scroll viewport
+        if (c.y + c.height >= viewportTop && c.y <= viewportBottom) {
+          auto &img = m_pdfPages[pageNum];
+          if (!img.valid()) {
+            Documents::renderPdfToBitmap(m_pdfBytes, img, pageNum);
+          }
+          if (img.valid()) {
+            BlitScaled(canvas, img, c);
+          } else {
+            FillRect(canvas, static_cast<int>(c.x), static_cast<int>(c.y),
+                     static_cast<int>(c.width), static_cast<int>(c.height),
+                     Paint::Color{0xee, 0xee, 0xee, 255});
+          }
+        }
       } else {
-        // Broken-image placeholder.
-        FillRect(canvas, static_cast<int>(c.x), static_cast<int>(c.y),
-                 static_cast<int>(c.width), static_cast<int>(c.height),
-                 Paint::Color{0xee, 0xee, 0xee, 255});
+        auto it = m_images.find(resolveUrl(srcVal));
+        if (it != m_images.end() && it->second.valid()) {
+          BlitScaled(canvas, it->second, c);
+        } else {
+          // Broken-image placeholder.
+          FillRect(canvas, static_cast<int>(c.x), static_cast<int>(c.y),
+                   static_cast<int>(c.width), static_cast<int>(c.height),
+                   Paint::Color{0xee, 0xee, 0xee, 255});
+        }
       }
     } else if (name == "video") {
       bool drew = false;
