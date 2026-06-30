@@ -25,6 +25,34 @@ void BaseWindow::SetMouseCallback(MouseCallback callback) {
   m_mouse = std::move(callback);
 }
 
+void BaseWindow::SetSelectionText(const std::string &text) {
+#if defined(_WIN32)
+  if (text.empty() || !OpenClipboard(hwnd)) {
+    return;
+  }
+  EmptyClipboard();
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
+  if (mem) {
+    char *dst = static_cast<char *>(GlobalLock(mem));
+    std::memcpy(dst, text.c_str(), text.size() + 1);
+    GlobalUnlock(mem);
+    SetClipboardData(CF_TEXT, mem);
+  }
+  CloseClipboard();
+#elif defined(__linux__) || defined(__gnu_linux__)
+  // Become the owner of both selections; SelectionRequest events are then
+  // served from m_selectionText in the event loop.
+  m_selectionText = text;
+  if (display && window) {
+    XSetSelectionOwner(display, m_atomPrimary, window, CurrentTime);
+    XSetSelectionOwner(display, m_atomClipboard, window, CurrentTime);
+    XFlush(display);
+  }
+#else
+  (void)text;
+#endif
+}
+
 Paint::Canvas BaseWindow::RenderContent() {
   int w = m_width > 0 ? m_width : 1;
   int h = m_height > 0 ? m_height : 1;
@@ -642,13 +670,18 @@ LRESULT BaseWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam,
   case WM_KEYDOWN:
     if (wParam == VK_ESCAPE) {
       DestroyWindow(hwnd);
-    } else if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN) {
+    } else if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP ||
+               wParam == VK_DOWN) {
       if (m_key) {
         Key e;
-        if (wParam == VK_LEFT) e.kind = Key::Left;
-        else if (wParam == VK_RIGHT) e.kind = Key::Right;
-        else if (wParam == VK_UP) e.kind = Key::Up;
-        else if (wParam == VK_DOWN) e.kind = Key::Down;
+        if (wParam == VK_LEFT)
+          e.kind = Key::Left;
+        else if (wParam == VK_RIGHT)
+          e.kind = Key::Right;
+        else if (wParam == VK_UP)
+          e.kind = Key::Up;
+        else if (wParam == VK_DOWN)
+          e.kind = Key::Down;
         if (m_key(e)) {
           InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -806,7 +839,13 @@ void BaseWindow::Run() {
   XStoreName(display, window, "DesktopWebview");
   XSelectInput(display, window,
                ExposureMask | KeyPressMask | ButtonPressMask |
-                   StructureNotifyMask);
+                   ButtonReleaseMask | Button1MotionMask | StructureNotifyMask);
+
+  // Clipboard selection atoms (for drag-to-select copy).
+  m_atomPrimary = XA_PRIMARY;
+  m_atomClipboard = XInternAtom(display, "CLIPBOARD", False);
+  m_atomTargets = XInternAtom(display, "TARGETS", False);
+  m_atomUtf8 = XInternAtom(display, "UTF8_STRING", False);
 
   Atom wmDelete = XInternAtom(display, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(display, window, &wmDelete, 1);
@@ -900,6 +939,68 @@ void BaseWindow::Run() {
             m_mouse(e);
           }
         }
+        break;
+      }
+
+      case ButtonRelease: {
+        if (m_mouse && event.xbutton.button == Button1) {
+          MouseEvent e;
+          e.kind = MouseEvent::ButtonUp;
+          e.x = event.xbutton.x;
+          e.y = event.xbutton.y;
+          m_mouse(e);
+        }
+        break;
+      }
+
+      case MotionNotify: {
+        if (m_mouse) {
+          // Coalesce queued motion events; only the latest position matters.
+          while (XPending(display)) {
+            XEvent next;
+            XPeekEvent(display, &next);
+            if (next.type != MotionNotify) {
+              break;
+            }
+            XNextEvent(display, &event);
+          }
+          MouseEvent e;
+          e.kind = MouseEvent::Move;
+          e.x = event.xmotion.x;
+          e.y = event.xmotion.y;
+          m_mouse(e);
+        }
+        break;
+      }
+
+      case SelectionRequest: {
+        // We own PRIMARY/CLIPBOARD: serve our selection text to the requestor.
+        const XSelectionRequestEvent &req = event.xselectionrequest;
+        XSelectionEvent resp = {};
+        resp.type = SelectionNotify;
+        resp.display = req.display;
+        resp.requestor = req.requestor;
+        resp.selection = req.selection;
+        resp.target = req.target;
+        resp.time = req.time;
+        resp.property = req.property ? req.property : req.target;
+        if (req.target == m_atomTargets) {
+          Atom targets[] = {m_atomTargets, m_atomUtf8, XA_STRING};
+          XChangeProperty(display, req.requestor, resp.property, XA_ATOM, 32,
+                          PropModeReplace,
+                          reinterpret_cast<unsigned char *>(targets),
+                          sizeof(targets) / sizeof(targets[0]));
+        } else if (req.target == m_atomUtf8 || req.target == XA_STRING) {
+          XChangeProperty(
+              display, req.requestor, resp.property, req.target, 8,
+              PropModeReplace,
+              reinterpret_cast<const unsigned char *>(m_selectionText.data()),
+              static_cast<int>(m_selectionText.size()));
+        } else {
+          resp.property = None; // unsupported target
+        }
+        XSendEvent(display, req.requestor, True, NoEventMask,
+                   reinterpret_cast<XEvent *>(&resp));
         break;
       }
 

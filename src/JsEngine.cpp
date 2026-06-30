@@ -1,4 +1,5 @@
 #include "../include/JsEngine.hpp"
+#include "../include/Debugger.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -7,6 +8,8 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+
+using namespace Debug;
 
 namespace DesktopWebview {
 namespace Js {
@@ -1744,9 +1747,7 @@ JsEngine::JsEngine(DomInterface dom) : m_dom(dom) {
   windowObj.setProperty(
       "alert", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
                    [](const std::vector<JsValue> &a) {
-                     std::cout << "[JS alert] "
-                               << (a.empty() ? "" : a[0].toString())
-                               << std::endl;
+                     MSGBOX_INFO("alert", (a.empty() ? "" : a[0].toString()));
                      return JsValue();
                    })));
   m_globalEnv->set("window", windowObj);

@@ -128,6 +128,10 @@ if cross then (
         echo "Running Windows TestBase64 executable via Wine..."
         echo "=========================================================="
         wine64 build-windows/TestBase64.exe || status=$?
+        echo "=========================================================="
+        echo "Running Windows TestPdf executable via Wine..."
+        echo "=========================================================="
+        wine64 build-windows/TestPdf.exe || status=$?
         return $status
       }
     '';
@@ -166,6 +170,10 @@ if cross then (
       pkgs.ffmpeg.dev
       pkgs.opencl-headers # OpenCL C headers (CL/cl.h)
       pkgs.ocl-icd        # OpenCL ICD loader (libOpenCL.so)
+      # Intel GPU OpenCL runtime (the GPU device the engine offloads to).
+      # The "legacy1" build is required for Gen9/Gen9.5 (Skylake..Kaby Lake,
+      # e.g. HD Graphics 620); the current intel-compute-runtime dropped them.
+      pkgs.intel-compute-runtime-legacy1
     ];
 
     shellHook = ''
@@ -173,6 +181,9 @@ if cross then (
       export PKG_CONFIG_PATH="${pkgs.xorg.libX11.dev}/lib/pkgconfig:${pkgs.xorg.libxcb.dev}/lib/pkgconfig:${pkgs.xorg.libXau.dev}/lib/pkgconfig:${pkgs.xorg.libXdmcp.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
       export VK_LAYER_PATH="${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d"
       export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib:${pkgs.lib.makeLibraryPath [ pkgs.libGL ]}:$LD_LIBRARY_PATH"
+      # Point the OpenCL ICD loader at the Intel GPU runtime so the engine finds
+      # a real GPU platform (otherwise clGetPlatformIDs returns 0 -> CPU fallback).
+      export OCL_ICD_VENDORS="${pkgs.intel-compute-runtime-legacy1}/etc/OpenCL/vendors"
 
       echo "=========================================================="
       echo "         DesktopWebview Native Linux Development Shell    "
@@ -188,8 +199,20 @@ if cross then (
         cmake -B build-linux -S . \
           -DCMAKE_BUILD_TYPE=Debug
         ln -sf build-linux/compile_commands.json compile_commands.json
-        echo "Building..."
-        cmake --build build-linux -j$(nproc)
+        echo "Building DesktopWebview..."
+        cmake --build build-linux -j$(nproc) --target DesktopWebview
+      }
+
+      build-test-linux(){
+        echo "Configuring CMake for Native Linux (tests only)..."
+        cmake -B build-linux -S . \
+          -DCMAKE_BUILD_TYPE=Debug
+        ln -sf build-linux/compile_commands.json compile_commands.json
+        echo "Building test executables..."
+        cmake --build build-linux -j$(nproc) --target \
+          TestNet TestWrapper TestCss TestLayout TestPaint TestImage \
+          TestSvg TestVideo TestFont TestBrowser TestPdf TestAudio \
+          TestWindowPaint TestJs TestBase64 TestOptimizer
       }
 
       run-linux() {
@@ -254,6 +277,14 @@ if cross then (
         echo "Running Linux TestBase64 executable..."
         echo "=========================================================="
         ./build-linux/TestBase64 || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestOptimizer executable..."
+        echo "=========================================================="
+        ./build-linux/TestOptimizer || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestPdf executable..."
+        echo "=========================================================="
+        ./build-linux/TestPdf || status=$?
         return $status
       }
     '';

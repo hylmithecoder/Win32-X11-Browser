@@ -10,8 +10,8 @@
 #include <vector>
 
 #if defined(_WIN32)
-#include <winsock2.h>
 #include <windows.h>
+#include <winsock2.h>
 #if defined(INFO)
 #undef INFO
 #endif
@@ -457,6 +457,404 @@ static inline void _msgbox_pump_events() {
       gtk_widget_destroy(dialog);                                              \
       Debug::_msgbox_pump_events();                                            \
     }                                                                          \
+  } while (0)
+
+#elif !defined(DESKTOP_WEBVIEW_NO_X11_ALERT)
+
+// ============================================
+// NATIVE X11 CUSTOM ALERT (raw Xlib, no GTK)
+// ============================================
+//
+// A self-contained modal alert drawn directly with Xlib -- no toolkit, no GTK
+// look. It renders a dark "card" with a level-coloured accent bar, a title, the
+// word-wrapped message, a faint file:line footer, and a single rounded OK
+// button that lightens on hover. The window is override-redirect (no window-
+// manager titlebar) so its appearance is fully ours. It auto-dismisses after
+// MSGBOX_AUTO_CLOSE_MS so it never blocks a headless run, and also closes on
+// click, Enter, Space or Escape.
+//
+// Define DESKTOP_WEBVIEW_NO_X11_ALERT to fall back to the zenity path instead.
+
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#include <algorithm>
+#include <cstring>
+#include <sys/select.h>
+
+#ifndef MSGBOX_AUTO_CLOSE_MS
+#define MSGBOX_AUTO_CLOSE_MS 5000
+#endif
+
+namespace Debug {
+
+// Allocate an X pixel from 8-bit-per-channel RGB on the given colormap.
+inline unsigned long _x11AllocRGB(Display *dpy, Colormap cmap, int r, int g,
+                                  int b) {
+  XColor c;
+  c.red = (unsigned short)(r * 257);
+  c.green = (unsigned short)(g * 257);
+  c.blue = (unsigned short)(b * 257);
+  c.flags = DoRed | DoGreen | DoBlue;
+  if (XAllocColor(dpy, cmap, &c)) {
+    return c.pixel;
+  }
+  return 0; // fall back to black on failure
+}
+
+// Per-level accent colour (the bar + the OK button).
+inline void _x11AccentFor(LogLevel level, int out[3]) {
+  switch (level) {
+  case LogLevel::WARNING:
+    out[0] = 240;
+    out[1] = 180;
+    out[2] = 40;
+    break; // amber
+  case LogLevel::CRASH:
+  case LogLevel::ERROR:
+    out[0] = 235;
+    out[1] = 70;
+    out[2] = 70;
+    break; // red
+  case LogLevel::SUCCESS:
+    out[0] = 70;
+    out[1] = 200;
+    out[2] = 120;
+    break; // green
+  case LogLevel::INFO:
+  default:
+    out[0] = 90;
+    out[1] = 150;
+    out[2] = 245;
+    break; // blue
+  }
+}
+
+inline const char *_x11LevelTitle(LogLevel level) {
+  switch (level) {
+  case LogLevel::WARNING:
+    return "Warning";
+  case LogLevel::CRASH:
+    return "Fatal Error";
+  case LogLevel::ERROR:
+    return "Error";
+  case LogLevel::SUCCESS:
+    return "Success";
+  case LogLevel::INFO:
+  default:
+    return "Information";
+  }
+}
+
+inline XFontStruct *_x11LoadFont(Display *dpy, const char *const *names) {
+  for (int i = 0; names[i]; ++i) {
+    if (XFontStruct *f = XLoadQueryFont(dpy, names[i])) {
+      return f;
+    }
+  }
+  return XLoadQueryFont(dpy, "fixed");
+}
+
+// Greedy word-wrap to at most `maxW` pixels per line; honours embedded '\n'.
+inline std::vector<std::string> _x11Wrap(XFontStruct *font,
+                                         const std::string &text, int maxW) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    std::size_t nl = text.find('\n', start);
+    std::string para = text.substr(
+        start, nl == std::string::npos ? std::string::npos : nl - start);
+    std::string line;
+    std::size_t i = 0;
+    while (i < para.size()) {
+      std::size_t sp = para.find(' ', i);
+      std::string word =
+          para.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+      std::string trial = line.empty() ? word : line + " " + word;
+      if (!line.empty() &&
+          XTextWidth(font, trial.c_str(), (int)trial.size()) > maxW) {
+        lines.push_back(line);
+        line = word;
+      } else {
+        line = trial;
+      }
+      if (sp == std::string::npos)
+        break;
+      i = sp + 1;
+    }
+    lines.push_back(line);
+    if (nl == std::string::npos)
+      break;
+    start = nl + 1;
+  }
+  if (lines.empty())
+    lines.push_back("");
+  return lines;
+}
+
+inline void ShowX11Alert(LogLevel level, const char *windowTitle,
+                         const std::string &message, const char *file, int line,
+                         int timeoutMs = MSGBOX_AUTO_CLOSE_MS) {
+  Display *dpy = XOpenDisplay(nullptr);
+  if (!dpy) {
+    // No display available: never lose the message -- print it instead.
+    std::cerr << "[ALERT:" << _x11LevelTitle(level) << "] " << message << " ("
+              << file << ":" << line << ")" << std::endl;
+    return;
+  }
+  int screen = DefaultScreen(dpy);
+  Window root = RootWindow(dpy, screen);
+  Colormap cmap = DefaultColormap(dpy, screen);
+
+  const char *bodyFontNames[] = {
+      "-*-helvetica-medium-r-normal--13-*-*-*-*-*-iso8859-1",
+      "-*-dejavu sans-medium-r-normal--13-*-*-*-*-*-*-*",
+      "-misc-fixed-medium-r-normal--13-*-*-*-*-*-*-*", nullptr};
+  const char *titleFontNames[] = {
+      "-*-helvetica-bold-r-normal--17-*-*-*-*-*-iso8859-1",
+      "-*-dejavu sans-bold-r-normal--17-*-*-*-*-*-*-*",
+      "-misc-fixed-bold-r-normal--15-*-*-*-*-*-*-*", nullptr};
+  XFontStruct *bodyFont = _x11LoadFont(dpy, bodyFontNames);
+  XFontStruct *titleFont = _x11LoadFont(dpy, titleFontNames);
+
+  const int pad = 22;
+  const int accentW = 6;
+  const int maxTextW = 420;
+  const char *titleStr = _x11LevelTitle(level);
+  std::string footer = std::string(file) + ":" + std::to_string(line);
+
+  std::vector<std::string> lines = _x11Wrap(bodyFont, message, maxTextW);
+
+  int bodyLineH = bodyFont->ascent + bodyFont->descent + 6;
+  int titleH = titleFont->ascent + titleFont->descent;
+
+  int textW = XTextWidth(titleFont, titleStr, (int)strlen(titleStr));
+  textW =
+      std::max(textW, XTextWidth(bodyFont, footer.c_str(), (int)footer.size()));
+  for (auto &l : lines) {
+    textW = std::max(textW, XTextWidth(bodyFont, l.c_str(), (int)l.size()));
+  }
+
+  const int btnW = 100, btnH = 36;
+  int contentW = std::max(textW, btnW);
+  int winW = std::max(accentW + pad + contentW + pad, 320);
+
+  int titleArea = pad + titleH + 14;
+  int bodyArea = (int)lines.size() * bodyLineH;
+  int footerArea = bodyFont->ascent + bodyFont->descent + 12;
+  int btnArea = 16 + btnH + pad;
+  int winH = titleArea + bodyArea + footerArea + btnArea;
+
+  int accent[3];
+  _x11AccentFor(level, accent);
+  unsigned long cBg = _x11AllocRGB(dpy, cmap, 24, 25, 33);
+  unsigned long cBorder = _x11AllocRGB(dpy, cmap, 60, 62, 78);
+  unsigned long cTitle =
+      _x11AllocRGB(dpy, cmap, accent[0], accent[1], accent[2]);
+  unsigned long cBody = _x11AllocRGB(dpy, cmap, 176, 180, 196);
+  unsigned long cFooter = _x11AllocRGB(dpy, cmap, 108, 111, 128);
+  unsigned long cAccent =
+      _x11AllocRGB(dpy, cmap, accent[0], accent[1], accent[2]);
+  unsigned long cAccentHi = _x11AllocRGB(
+      dpy, cmap, std::min(255, accent[0] + 28), std::min(255, accent[1] + 28),
+      std::min(255, accent[2] + 28));
+  unsigned long cBtnText = _x11AllocRGB(dpy, cmap, 16, 17, 22);
+  (void)cTitle;
+
+  int sw = DisplayWidth(dpy, screen), sh = DisplayHeight(dpy, screen);
+  int wx = std::max(0, (sw - winW) / 2), wy = std::max(0, (sh - winH) / 2);
+
+  XSetWindowAttributes attrs;
+  attrs.override_redirect = True; // no WM chrome -> fully custom appearance
+  attrs.background_pixel = cBg;
+  attrs.border_pixel = cBorder;
+  attrs.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                     KeyPressMask | PointerMotionMask;
+  Window win = XCreateWindow(
+      dpy, root, wx, wy, winW, winH, 1, CopyFromParent, InputOutput,
+      CopyFromParent,
+      CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &attrs);
+  XStoreName(dpy, win, windowTitle ? windowTitle : TITLE);
+
+  GC gc = XCreateGC(dpy, win, 0, nullptr);
+  XMapRaised(dpy, win);
+  XGrabKeyboard(dpy, win, True, GrabModeAsync, GrabModeAsync, CurrentTime);
+  XFlush(dpy);
+
+  int btnX = winW - pad - btnW;
+  int btnY = winH - pad - btnH;
+  bool hover = false;
+  auto inBtn = [&](int px, int py) {
+    return px >= btnX && px <= btnX + btnW && py >= btnY && py <= btnY + btnH;
+  };
+
+  auto draw = [&]() {
+    XSetForeground(dpy, gc, cBg);
+    XFillRectangle(dpy, win, gc, 0, 0, winW, winH);
+    XSetForeground(dpy, gc, cAccent);
+    XFillRectangle(dpy, win, gc, 0, 0, accentW, winH);
+
+    int tx = accentW + pad;
+    XSetFont(dpy, gc, titleFont->fid);
+    XSetForeground(dpy, gc, cAccent);
+    XDrawString(dpy, win, gc, tx, pad + titleFont->ascent, titleStr,
+                (int)strlen(titleStr));
+
+    XSetForeground(dpy, gc, cBorder);
+    int sepY = pad + titleH + 7;
+    XDrawLine(dpy, win, gc, tx, sepY, winW - pad, sepY);
+
+    XSetFont(dpy, gc, bodyFont->fid);
+    XSetForeground(dpy, gc, cBody);
+    int by = titleArea + bodyFont->ascent;
+    for (auto &l : lines) {
+      XDrawString(dpy, win, gc, tx, by, l.c_str(), (int)l.size());
+      by += bodyLineH;
+    }
+    XSetForeground(dpy, gc, cFooter);
+    XDrawString(dpy, win, gc, tx, by + 6, footer.c_str(), (int)footer.size());
+
+    int r = 7;
+    XSetForeground(dpy, gc, hover ? cAccentHi : cAccent);
+    XFillRectangle(dpy, win, gc, btnX + r, btnY, btnW - 2 * r, btnH);
+    XFillRectangle(dpy, win, gc, btnX, btnY + r, btnW, btnH - 2 * r);
+    XFillArc(dpy, win, gc, btnX, btnY, 2 * r, 2 * r, 90 * 64, 90 * 64);
+    XFillArc(dpy, win, gc, btnX + btnW - 2 * r, btnY, 2 * r, 2 * r, 0, 90 * 64);
+    XFillArc(dpy, win, gc, btnX, btnY + btnH - 2 * r, 2 * r, 2 * r, 180 * 64,
+             90 * 64);
+    XFillArc(dpy, win, gc, btnX + btnW - 2 * r, btnY + btnH - 2 * r, 2 * r,
+             2 * r, 270 * 64, 90 * 64);
+    const char *ok = "OK";
+    int okW = XTextWidth(bodyFont, ok, 2);
+    XSetForeground(dpy, gc, cBtnText);
+    XDrawString(dpy, win, gc, btnX + (btnW - okW) / 2,
+                btnY + (btnH + bodyFont->ascent - bodyFont->descent) / 2, ok,
+                2);
+    XFlush(dpy);
+  };
+
+  int xfd = ConnectionNumber(dpy);
+  bool done = false;
+  auto startT = std::chrono::steady_clock::now();
+  while (!done) {
+    while (XPending(dpy)) {
+      XEvent ev;
+      XNextEvent(dpy, &ev);
+      switch (ev.type) {
+      case Expose:
+        draw();
+        break;
+      case MotionNotify: {
+        bool h = inBtn(ev.xmotion.x, ev.xmotion.y);
+        if (h != hover) {
+          hover = h;
+          draw();
+        }
+      } break;
+      case ButtonPress:
+        if (ev.xbutton.button == Button1 && inBtn(ev.xbutton.x, ev.xbutton.y)) {
+          done = true;
+        }
+        break;
+      case KeyPress: {
+        KeySym ks = XLookupKeysym(&ev.xkey, 0);
+        if (ks == XK_Return || ks == XK_KP_Enter || ks == XK_Escape ||
+            ks == XK_space) {
+          done = true;
+        }
+      } break;
+      }
+    }
+    if (done)
+      break;
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(xfd, &fds);
+    struct timeval tv = {0, 50 * 1000};
+    select(xfd + 1, &fds, nullptr, nullptr, &tv);
+    if (timeoutMs > 0) {
+      double el = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - startT)
+                      .count();
+      if (el >= timeoutMs)
+        done = true;
+    }
+  }
+
+  XUngrabKeyboard(dpy, CurrentTime);
+  XFreeGC(dpy, gc);
+  if (bodyFont)
+    XFreeFont(dpy, bodyFont);
+  if (titleFont)
+    XFreeFont(dpy, titleFont);
+  XDestroyWindow(dpy, win);
+  XCloseDisplay(dpy);
+}
+
+} // namespace Debug
+
+// The `parent` argument is accepted for API parity with the GTK/Win32 paths but
+// is unused: the alert is centred on screen as an override-redirect window.
+#define MSGBOX_INFO(parent, message)                                           \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    Debug::ShowX11Alert(Debug::LogLevel::INFO, TITLE, std::string(message),    \
+                        __FILE__, __LINE__);                                   \
+  } while (0)
+
+#define MSGBOX_SUCCESS(parent, message)                                        \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    Debug::ShowX11Alert(Debug::LogLevel::SUCCESS, TITLE, std::string(message), \
+                        __FILE__, __LINE__);                                   \
+  } while (0)
+
+#define MSGBOX_WARNING(parent, message)                                        \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    Debug::ShowX11Alert(Debug::LogLevel::WARNING, TITLE, std::string(message), \
+                        __FILE__, __LINE__);                                   \
+  } while (0)
+
+#define MSGBOX_ERROR(parent, message)                                          \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    Debug::ShowX11Alert(Debug::LogLevel::ERROR, TITLE, std::string(message),   \
+                        __FILE__, __LINE__);                                   \
+  } while (0)
+
+#define MSGBOX_CRASH(parent, message)                                          \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    Debug::ShowX11Alert(Debug::LogLevel::CRASH, TITLE, std::string(message),   \
+                        __FILE__, __LINE__);                                   \
+    abort();                                                                   \
+  } while (0)
+
+#define MSGBOX_INFOF(parent, format, ...)                                      \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    char _msgbox_buf[2048];                                                    \
+    snprintf(_msgbox_buf, sizeof(_msgbox_buf), (format), ##__VA_ARGS__);       \
+    Debug::ShowX11Alert(Debug::LogLevel::INFO, TITLE,                          \
+                        std::string(_msgbox_buf), __FILE__, __LINE__);         \
+  } while (0)
+
+#define MSGBOX_WARNINGF(parent, format, ...)                                   \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    char _msgbox_buf[2048];                                                    \
+    snprintf(_msgbox_buf, sizeof(_msgbox_buf), (format), ##__VA_ARGS__);       \
+    Debug::ShowX11Alert(Debug::LogLevel::WARNING, TITLE,                       \
+                        std::string(_msgbox_buf), __FILE__, __LINE__);         \
+  } while (0)
+
+#define MSGBOX_ERRORF(parent, format, ...)                                     \
+  do {                                                                         \
+    (void)(parent);                                                            \
+    char _msgbox_buf[2048];                                                    \
+    snprintf(_msgbox_buf, sizeof(_msgbox_buf), (format), ##__VA_ARGS__);       \
+    Debug::ShowX11Alert(Debug::LogLevel::ERROR, TITLE,                         \
+                        std::string(_msgbox_buf), __FILE__, __LINE__);         \
   } while (0)
 
 #else

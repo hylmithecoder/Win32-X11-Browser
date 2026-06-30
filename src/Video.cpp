@@ -1,9 +1,12 @@
+#include "../include/Audio.hpp"
 #include "../include/Video.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <thread>
 
 namespace DesktopWebview {
 namespace Video {
@@ -117,6 +120,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
+#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 
@@ -137,11 +141,32 @@ struct FfmpegVideoSource::Impl {
 
   // Sequential-decode bookkeeping: time (seconds, relative to stream start) of
   // the most recently decoded frame, so we can decode forward without seeking
-  // when frames are requested in order (the common playback case).
+  // when frames are requested in sequence (the common playback case).
   double lastDecodedTime = -1.0;
   int64_t startTime = 0; // stream start_time in stream time_base units
 
+  // Audio state
+  int audioStreamIndex = -1;
+  AVCodecContext *audioCodecCtx = nullptr;
+  SwrContext *audioSwr = nullptr;
+  AVFrame *audioFrame = nullptr;
+  AVFormatContext *audioFmt = nullptr;     // separate fmt ctx for audio thread
+  int audioSampleRateVal = 0;
+  int audioChannelsVal = 0;
+  std::thread audioThread;
+  std::atomic<bool> audioActive{false};
+
   ~Impl() {
+    stopAudio();
+    if (audioFrame)
+      av_frame_free(&audioFrame);
+    if (audioSwr)
+      swr_free(&audioSwr);
+    if (audioCodecCtx)
+      avcodec_free_context(&audioCodecCtx);
+    if (audioFmt)
+      avformat_close_input(&audioFmt);
+
     if (sws)
       sws_freeContext(sws);
     if (rgbaBuf)
@@ -156,6 +181,24 @@ struct FfmpegVideoSource::Impl {
       avcodec_free_context(&codec);
     if (fmt)
       avformat_close_input(&fmt);
+  }
+
+  void startAudio() {
+    if (audioActive || audioStreamIndex < 0 || !audioCodecCtx) {
+      return;
+    }
+    audioActive = true;
+    audioThread = std::thread(&Impl::audioPlaybackLoop, this);
+  }
+
+  void stopAudio() {
+    if (!audioActive) {
+      return;
+    }
+    audioActive = false;
+    if (audioThread.joinable()) {
+      audioThread.join();
+    }
   }
 
   bool open(const std::string &url) {
@@ -218,6 +261,9 @@ struct FfmpegVideoSource::Impl {
     if (!sws) {
       return false;
     }
+    // Try to set up audio (non-fatal if no audio stream or decoder).
+    setupAudio(url);
+
     valid = true;
     return true;
   }
@@ -267,6 +313,170 @@ struct FfmpegVideoSource::Impl {
     av_seek_frame(fmt, streamIndex, ts, AVSEEK_FLAG_BACKWARD);
     avcodec_flush_buffers(codec);
     lastDecodedTime = -1.0;
+  }
+
+  // Set up audio decoding (best-effort; non-fatal on failure).
+  void setupAudio(const std::string &url) {
+    audioStreamIndex =
+        av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (audioStreamIndex < 0) {
+      return;
+    }
+    // Open a separate format context for the audio thread so video and
+    // audio decoding do not share a single AVFormatContext (not thread-safe).
+    if (avformat_open_input(&audioFmt, url.c_str(), nullptr, nullptr) != 0) {
+      return;
+    }
+    if (avformat_find_stream_info(audioFmt, nullptr) < 0) {
+      avformat_close_input(&audioFmt);
+      audioFmt = nullptr;
+      return;
+    }
+
+    // Re-find audio stream index in the separate audio format context.
+    int aIdx = av_find_best_stream(audioFmt, AVMEDIA_TYPE_AUDIO, -1, -1,
+                                   nullptr, 0);
+    if (aIdx < 0) {
+      avcodec_free_context(&audioCodecCtx);
+      audioCodecCtx = nullptr;
+      avformat_close_input(&audioFmt);
+      audioFmt = nullptr;
+      return;
+    }
+    audioStreamIndex = aIdx;
+
+    AVStream *st = audioFmt->streams[audioStreamIndex];
+    const AVCodec *dec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!dec) {
+      avformat_close_input(&audioFmt);
+      audioFmt = nullptr;
+      return;
+    }
+    audioCodecCtx = avcodec_alloc_context3(dec);
+    if (!audioCodecCtx ||
+        avcodec_parameters_to_context(audioCodecCtx, st->codecpar) < 0 ||
+        avcodec_open2(audioCodecCtx, dec, nullptr) < 0) {
+      avcodec_free_context(&audioCodecCtx);
+      audioCodecCtx = nullptr;
+      avformat_close_input(&audioFmt);
+      audioFmt = nullptr;
+      return;
+    }
+
+    audioSampleRateVal = audioCodecCtx->sample_rate;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    audioChannelsVal = audioCodecCtx->ch_layout.nb_channels;
+#else
+    audioChannelsVal = audioCodecCtx->channels;
+#endif
+
+    // Set up resampler: convert native sample format -> S16 interleaved.
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    AVChannelLayout outLayout;
+    av_channel_layout_default(&outLayout, audioChannelsVal);
+    swr_alloc_set_opts2(&audioSwr, &outLayout, AV_SAMPLE_FMT_S16,
+                        audioSampleRateVal, &audioCodecCtx->ch_layout,
+                        audioCodecCtx->sample_fmt, audioCodecCtx->sample_rate,
+                        0, nullptr);
+#else
+    int64_t outLayout = av_get_default_channel_layout(audioChannelsVal);
+    audioSwr = swr_alloc_set_opts(nullptr, outLayout, AV_SAMPLE_FMT_S16,
+                                  audioSampleRateVal,
+                                  audioCodecCtx->channel_layout,
+                                  audioCodecCtx->sample_fmt,
+                                  audioCodecCtx->sample_rate, 0, nullptr);
+#endif
+    if (!audioSwr || swr_init(audioSwr) < 0) {
+      swr_free(&audioSwr);
+      audioSwr = nullptr;
+      avcodec_free_context(&audioCodecCtx);
+      audioCodecCtx = nullptr;
+      avformat_close_input(&audioFmt);
+      audioFmt = nullptr;
+      return;
+    }
+
+    audioFrame = av_frame_alloc();
+    if (!audioFrame) {
+      swr_free(&audioSwr);
+      audioSwr = nullptr;
+      avcodec_free_context(&audioCodecCtx);
+      audioCodecCtx = nullptr;
+      avformat_close_input(&audioFmt);
+      audioFmt = nullptr;
+    }
+  }
+
+  // Background thread: decode audio packets and play through AudioOutput.
+  void audioPlaybackLoop() {
+    Audio::AudioOutput audioOut;
+    if (!audioOut.open(audioSampleRateVal, audioChannelsVal)) {
+      audioActive = false;
+      return;
+    }
+
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt) {
+      audioActive = false;
+      return;
+    }
+
+    // Seek audio stream to beginning.
+    AVStream *st = audioFmt->streams[audioStreamIndex];
+    int64_t seekTs =
+        (st->start_time == AV_NOPTS_VALUE) ? 0 : st->start_time;
+    av_seek_frame(audioFmt, audioStreamIndex, seekTs, AVSEEK_FLAG_BACKWARD);
+    avcodec_flush_buffers(audioCodecCtx);
+
+    uint8_t *resampleBuf = nullptr;
+
+    while (audioActive) {
+      int ret = avcodec_receive_frame(audioCodecCtx, audioFrame);
+      if (ret == 0) {
+        int outSamples = av_rescale_rnd(
+            swr_get_delay(audioSwr, audioCodecCtx->sample_rate) +
+                audioFrame->nb_samples,
+            audioSampleRateVal, audioCodecCtx->sample_rate, AV_ROUND_UP);
+        int bufSize = av_samples_get_buffer_size(nullptr, audioChannelsVal,
+                                                  outSamples, AV_SAMPLE_FMT_S16,
+                                                  1);
+        resampleBuf =
+            static_cast<uint8_t *>(av_realloc(resampleBuf, bufSize));
+        uint8_t *planes[1] = {resampleBuf};
+        int converted = swr_convert(
+            audioSwr, planes, outSamples,
+            const_cast<const uint8_t **>(audioFrame->extended_data),
+            audioFrame->nb_samples);
+        if (converted > 0) {
+          audioOut.write(reinterpret_cast<const int16_t *>(resampleBuf),
+                         converted);
+        }
+        continue;
+      }
+      if (ret == AVERROR_EOF) {
+        break;
+      }
+      if (ret != AVERROR(EAGAIN)) {
+        break;
+      }
+
+      // Need more input packets.
+      av_packet_unref(pkt);
+      int rd = av_read_frame(audioFmt, pkt);
+      if (rd < 0) {
+        // Flush decoder.
+        avcodec_send_packet(audioCodecCtx, nullptr);
+        continue;
+      }
+      if (pkt->stream_index == audioStreamIndex) {
+        avcodec_send_packet(audioCodecCtx, pkt);
+      }
+    }
+
+    av_free(resampleBuf);
+    av_packet_free(&pkt);
+    audioOut.close();
+    audioActive = false;
   }
 
   bool getFrameAt(int index, Image::Bitmap &out) {
@@ -342,6 +552,26 @@ bool FfmpegVideoSource::frameAt(int index, Image::Bitmap &out) {
   return m_impl->getFrameAt(index, out);
 }
 
+bool FfmpegVideoSource::hasAudio() const {
+  return m_impl && m_impl->audioStreamIndex >= 0;
+}
+int FfmpegVideoSource::audioSampleRate() const {
+  return m_impl ? m_impl->audioSampleRateVal : 0;
+}
+int FfmpegVideoSource::audioChannels() const {
+  return m_impl ? m_impl->audioChannelsVal : 0;
+}
+void FfmpegVideoSource::startAudio() {
+  if (m_impl) {
+    m_impl->startAudio();
+  }
+}
+void FfmpegVideoSource::stopAudio() {
+  if (m_impl) {
+    m_impl->stopAudio();
+  }
+}
+
 #else // !DWV_HAVE_FFMPEG
 
 struct FfmpegVideoSource::Impl {};
@@ -353,6 +583,11 @@ double FfmpegVideoSource::frameRate() const { return 0.0; }
 int FfmpegVideoSource::frameCount() const { return 0; }
 bool FfmpegVideoSource::valid() const { return false; }
 bool FfmpegVideoSource::frameAt(int, Image::Bitmap &) { return false; }
+bool FfmpegVideoSource::hasAudio() const { return false; }
+int FfmpegVideoSource::audioSampleRate() const { return 0; }
+int FfmpegVideoSource::audioChannels() const { return 0; }
+void FfmpegVideoSource::startAudio() {}
+void FfmpegVideoSource::stopAudio() {}
 
 #endif // DWV_HAVE_FFMPEG
 

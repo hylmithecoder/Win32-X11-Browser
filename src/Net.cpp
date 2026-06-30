@@ -19,6 +19,8 @@ typedef int SocketType;
 #define INVALID_SOCKET_VAL -1
 #endif
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <iostream>
 #include <openssl/err.h>
@@ -442,12 +444,83 @@ std::string Delete(const std::string &url) {
   return PerformRequest("DELETE", url);
 }
 
+namespace {
+
+// Decode an HTTP/1.1 "Transfer-Encoding: chunked" body: a sequence of
+// <hex-size>CRLF <data> CRLF blocks terminated by a zero-size chunk. Apache and
+// nginx use this instead of Content-Length for dynamically generated pages
+// (e.g. directory listings), so without decoding the body still carries the
+// chunk-size framing and is unusable.
+std::string DecodeChunked(const std::string &body) {
+  std::string out;
+  size_t pos = 0;
+  while (pos < body.size()) {
+    size_t lineEnd = body.find("\r\n", pos);
+    if (lineEnd == std::string::npos) {
+      break;
+    }
+    // The size line may carry ";chunk-extension" after the hex size.
+    std::string sizeLine = body.substr(pos, lineEnd - pos);
+    size_t semi = sizeLine.find(';');
+    if (semi != std::string::npos) {
+      sizeLine = sizeLine.substr(0, semi);
+    }
+    size_t s = sizeLine.find_first_not_of(" \t");
+    size_t e = sizeLine.find_last_not_of(" \t");
+    if (s == std::string::npos) {
+      pos = lineEnd + 2;
+      continue;
+    }
+    sizeLine = sizeLine.substr(s, e - s + 1);
+
+    unsigned long chunkSize = 0;
+    try {
+      chunkSize = std::stoul(sizeLine, nullptr, 16);
+    } catch (...) {
+      break; // malformed size line: stop with what we have
+    }
+    pos = lineEnd + 2; // past the size line's CRLF
+    if (chunkSize == 0) {
+      break; // last chunk
+    }
+    if (pos + chunkSize > body.size()) {
+      out.append(body, pos, body.size() - pos); // truncated response
+      break;
+    }
+    out.append(body, pos, chunkSize);
+    pos += chunkSize;
+    // Skip the CRLF that terminates the chunk data.
+    if (pos + 2 <= body.size() && body[pos] == '\r' && body[pos + 1] == '\n') {
+      pos += 2;
+    }
+  }
+  return out;
+}
+
+} // namespace
+
 std::string ExtractBody(const std::string &response) {
   size_t delimiter = response.find("\r\n\r\n");
   if (delimiter == std::string::npos) {
     return response;
   }
-  return response.substr(delimiter + 4);
+  std::string headers = response.substr(0, delimiter);
+  std::string body = response.substr(delimiter + 4);
+
+  // De-chunk if the server used Transfer-Encoding: chunked.
+  std::string lowerHeaders = headers;
+  std::transform(lowerHeaders.begin(), lowerHeaders.end(), lowerHeaders.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  size_t te = lowerHeaders.find("transfer-encoding:");
+  if (te != std::string::npos) {
+    size_t eol = lowerHeaders.find("\r\n", te);
+    std::string value = lowerHeaders.substr(
+        te, eol == std::string::npos ? std::string::npos : eol - te);
+    if (value.find("chunked") != std::string::npos) {
+      return DecodeChunked(body);
+    }
+  }
+  return body;
 }
 
 } // namespace Net

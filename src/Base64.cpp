@@ -8,83 +8,33 @@
 #include <sstream>
 #include <vector>
 
-// ---- OpenCL (optional, compile-time gated) ----------------------------------
-#ifdef DWV_HAVE_OPENCL
-#define CL_TARGET_OPENCL_VERSION 120
-#ifdef __APPLE__
-#include <OpenCL/opencl.h>
-#else
-#include <CL/cl.h>
-#endif
+// ---- OpenCL ----------------------------------------------------------------
+// All device/context/queue/kernel management lives in the shared Cl module;
+// this file only enqueues work on it. That keeps a single OpenCL context for
+// the whole program (see include/Cl.hpp).
+#include "../include/Cl.hpp"
 
+#ifdef DWV_HAVE_OPENCL
 namespace {
 
-struct ClState {
-  cl_platform_id platform = nullptr;
-  cl_device_id device = nullptr;
-  cl_context context = nullptr;
-  cl_command_queue queue = nullptr;
-  cl_program program = nullptr;
-  cl_kernel decodeKernel = nullptr;
-  cl_kernel encodeKernel = nullptr;
-  bool initialised = false;
-};
-
-ClState &cl() {
-  static ClState s;
-  return s;
-}
-
-// Read the kernel source file from disk. Searches assets/kernels/ relative
-// to common working-directory layouts.
-std::string ReadKernelSource() {
-  const char *candidates[] = {
-      "assets/kernels/base64.cl",
-      "../assets/kernels/base64.cl",
-      "../../assets/kernels/base64.cl",
-  };
-  for (const char *path : candidates) {
-    std::ifstream f(path, std::ios::binary);
-    if (f) {
-      return std::string((std::istreambuf_iterator<char>(f)),
-                         std::istreambuf_iterator<char>());
+// Resolve, once, the base64 kernel source path among common layouts. Empty if
+// the asset cannot be found. Cl::kernel() reads and compiles it (cached).
+const std::string &KernelPath() {
+  static const std::string path = [] {
+    const char *candidates[] = {
+        "assets/kernels/base64.cl",
+        "../assets/kernels/base64.cl",
+        "../../assets/kernels/base64.cl",
+    };
+    for (const char *p : candidates) {
+      std::ifstream f(p);
+      if (f) {
+        return std::string(p);
+      }
     }
-  }
-  return "";
-}
-
-bool BuildClProgram(ClState &s, const std::string &source) {
-  const char *src = source.c_str();
-  size_t len = source.size();
-  cl_int err;
-  s.program = clCreateProgramWithSource(s.context, 1, &src, &len, &err);
-  if (err != CL_SUCCESS) {
-    return false;
-  }
-  err = clBuildProgram(s.program, 1, &s.device, nullptr, nullptr, nullptr);
-  if (err != CL_SUCCESS) {
-    size_t logSize = 0;
-    clGetProgramBuildInfo(s.program, s.device, CL_PROGRAM_BUILD_LOG, 0, nullptr,
-                          &logSize);
-    if (logSize > 1) {
-      std::vector<char> log(logSize);
-      clGetProgramBuildInfo(s.program, s.device, CL_PROGRAM_BUILD_LOG, logSize,
-                            log.data(), nullptr);
-      std::cerr << "[OpenCL] Build log: " << log.data() << std::endl;
-    }
-    clReleaseProgram(s.program);
-    s.program = nullptr;
-    return false;
-  }
-  s.decodeKernel = clCreateKernel(s.program, "base64_decode", &err);
-  if (err != CL_SUCCESS) {
-    return false;
-  }
-  s.encodeKernel = clCreateKernel(s.program, "base64_encode", &err);
-  if (err != CL_SUCCESS) {
-    return false;
-  }
-  return true;
+    return std::string();
+  }();
+  return path;
 }
 
 } // namespace
@@ -186,55 +136,23 @@ namespace Base64 {
 
 bool initOpenCL() {
 #ifdef DWV_HAVE_OPENCL
-  ClState &s = cl();
-  if (s.initialised) {
-    return true;
-  }
-  cl_int err;
-
-  err = clGetPlatformIDs(1, &s.platform, nullptr);
-  if (err != CL_SUCCESS || !s.platform) {
-    std::cerr << "[OpenCL] No platform found" << std::endl;
+  // Bring up the shared context, then pre-build (and cache) both kernels so the
+  // first real encode/decode doesn't pay the compile cost.
+  if (!Cl::init()) {
     return false;
   }
-
-  err = clGetDeviceIDs(s.platform, CL_DEVICE_TYPE_GPU, 1, &s.device, nullptr);
-  if (err != CL_SUCCESS || !s.device) {
-    // Try any device (including CPU OpenCL) as a fallback.
-    err = clGetDeviceIDs(s.platform, CL_DEVICE_TYPE_ALL, 1, &s.device, nullptr);
-    if (err != CL_SUCCESS || !s.device) {
-      std::cerr << "[OpenCL] No device found" << std::endl;
-      return false;
-    }
-  }
-
-  char devName[128] = {};
-  clGetDeviceInfo(s.device, CL_DEVICE_NAME, sizeof(devName), devName, nullptr);
-  std::cerr << "[OpenCL] Using device: " << devName << std::endl;
-
-  s.context = clCreateContext(nullptr, 1, &s.device, nullptr, nullptr, &err);
-  if (err != CL_SUCCESS) {
+  const std::string &path = KernelPath();
+  if (path.empty()) {
+    std::cerr << "[Base64] kernel source not found" << std::endl;
     return false;
   }
-
-  s.queue = clCreateCommandQueue(s.context, s.device, 0, &err);
-  if (err != CL_SUCCESS) {
+  cl_kernel dec = Cl::kernel(path, "base64_decode");
+  cl_kernel enc = Cl::kernel(path, "base64_encode");
+  if (!dec || !enc) {
     return false;
   }
-
-  std::string source = ReadKernelSource();
-  if (source.empty()) {
-    std::cerr << "[OpenCL] Kernel source not found" << std::endl;
-    return false;
-  }
-
-  if (!BuildClProgram(s, source)) {
-    std::cerr << "[OpenCL] Program build failed" << std::endl;
-    return false;
-  }
-
-  s.initialised = true;
-  std::cerr << "[OpenCL] Base64 GPU acceleration enabled" << std::endl;
+  std::cerr << "[Base64] GPU acceleration enabled (" << Cl::deviceName() << ")"
+            << std::endl;
   return true;
 #else
   return false;
@@ -243,7 +161,7 @@ bool initOpenCL() {
 
 bool isOpenCLAvailable() {
 #ifdef DWV_HAVE_OPENCL
-  return cl().initialised;
+  return Cl::available();
 #else
   return false;
 #endif
@@ -278,27 +196,32 @@ bool decode(const std::string &input, std::vector<std::uint8_t> &out) {
   out.resize(outLen, 0);
 
 #ifdef DWV_HAVE_OPENCL
-  ClState &s = cl();
-  if (s.initialised && srcLen >= kGpuThreshold) {
+  cl_kernel decodeKernel =
+      Cl::available() && srcLen >= kGpuThreshold
+          ? Cl::kernel(KernelPath(), "base64_decode")
+          : nullptr;
+  if (decodeKernel) {
+    cl_context ctx = Cl::context();
+    cl_command_queue q = Cl::queue();
     cl_int err;
     cl_mem d_src =
-        clCreateBuffer(s.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                       srcLen, (void *)stripped.data(), &err);
+        clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, srcLen,
+                       (void *)stripped.data(), &err);
     cl_mem d_dst =
-        clCreateBuffer(s.context, CL_MEM_WRITE_ONLY, outLen, nullptr, &err);
+        clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, outLen, nullptr, &err);
     if (err == CL_SUCCESS) {
       cl_uint uiSrcLen = static_cast<cl_uint>(srcLen);
       cl_uint uiDstLen = static_cast<cl_uint>(outLen);
-      clSetKernelArg(s.decodeKernel, 0, sizeof(cl_mem), &d_src);
-      clSetKernelArg(s.decodeKernel, 1, sizeof(cl_uint), &uiSrcLen);
-      clSetKernelArg(s.decodeKernel, 2, sizeof(cl_mem), &d_dst);
-      clSetKernelArg(s.decodeKernel, 3, sizeof(cl_uint), &uiDstLen);
+      clSetKernelArg(decodeKernel, 0, sizeof(cl_mem), &d_src);
+      clSetKernelArg(decodeKernel, 1, sizeof(cl_uint), &uiSrcLen);
+      clSetKernelArg(decodeKernel, 2, sizeof(cl_mem), &d_dst);
+      clSetKernelArg(decodeKernel, 3, sizeof(cl_uint), &uiDstLen);
       size_t globalSize = srcLen / 4;
-      err = clEnqueueNDRangeKernel(s.queue, s.decodeKernel, 1, nullptr,
-                                   &globalSize, nullptr, 0, nullptr, nullptr);
+      err = clEnqueueNDRangeKernel(q, decodeKernel, 1, nullptr, &globalSize,
+                                   nullptr, 0, nullptr, nullptr);
       if (err == CL_SUCCESS) {
-        clEnqueueReadBuffer(s.queue, d_dst, CL_TRUE, 0, outLen, out.data(), 0,
-                            nullptr, nullptr);
+        clEnqueueReadBuffer(q, d_dst, CL_TRUE, 0, outLen, out.data(), 0, nullptr,
+                            nullptr);
         clReleaseMemObject(d_src);
         clReleaseMemObject(d_dst);
         return !out.empty();
@@ -328,30 +251,33 @@ std::string encode(const std::uint8_t *data, std::size_t len) {
   }
 
 #ifdef DWV_HAVE_OPENCL
-  ClState &s = cl();
-  if (s.initialised && len >= kGpuThreshold) {
+  cl_kernel encodeKernel = Cl::available() && len >= kGpuThreshold
+                               ? Cl::kernel(KernelPath(), "base64_encode")
+                               : nullptr;
+  if (encodeKernel) {
+    cl_context ctx = Cl::context();
+    cl_command_queue q = Cl::queue();
     std::size_t outLen = ((len + 2) / 3) * 4;
     std::string result(outLen, '\0');
     cl_int err;
-    cl_mem d_src =
-        clCreateBuffer(s.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, len,
-                       (void *)data, &err);
+    cl_mem d_src = clCreateBuffer(
+        ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, len, (void *)data, &err);
     cl_mem d_dst =
-        clCreateBuffer(s.context, CL_MEM_WRITE_ONLY | CL_MEM_COPY_HOST_PTR,
-                       outLen, (void *)result.data(), &err);
+        clCreateBuffer(ctx, CL_MEM_WRITE_ONLY | CL_MEM_COPY_HOST_PTR, outLen,
+                       (void *)result.data(), &err);
     if (err == CL_SUCCESS) {
       cl_uint uiSrcLen = static_cast<cl_uint>(len);
       cl_uint uiDstLen = static_cast<cl_uint>(outLen);
-      clSetKernelArg(s.encodeKernel, 0, sizeof(cl_mem), &d_src);
-      clSetKernelArg(s.encodeKernel, 1, sizeof(cl_uint), &uiSrcLen);
-      clSetKernelArg(s.encodeKernel, 2, sizeof(cl_mem), &d_dst);
-      clSetKernelArg(s.encodeKernel, 3, sizeof(cl_uint), &uiDstLen);
+      clSetKernelArg(encodeKernel, 0, sizeof(cl_mem), &d_src);
+      clSetKernelArg(encodeKernel, 1, sizeof(cl_uint), &uiSrcLen);
+      clSetKernelArg(encodeKernel, 2, sizeof(cl_mem), &d_dst);
+      clSetKernelArg(encodeKernel, 3, sizeof(cl_uint), &uiDstLen);
       size_t globalSize = (len + 2) / 3;
-      err = clEnqueueNDRangeKernel(s.queue, s.encodeKernel, 1, nullptr,
-                                   &globalSize, nullptr, 0, nullptr, nullptr);
+      err = clEnqueueNDRangeKernel(q, encodeKernel, 1, nullptr, &globalSize,
+                                   nullptr, 0, nullptr, nullptr);
       if (err == CL_SUCCESS) {
-        clEnqueueReadBuffer(s.queue, d_dst, CL_TRUE, 0, outLen,
-                            (void *)result.data(), 0, nullptr, nullptr);
+        clEnqueueReadBuffer(q, d_dst, CL_TRUE, 0, outLen, (void *)result.data(),
+                            0, nullptr, nullptr);
         clReleaseMemObject(d_src);
         clReleaseMemObject(d_dst);
         return result;

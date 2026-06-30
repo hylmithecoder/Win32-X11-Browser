@@ -28,10 +28,11 @@ file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include
 add_executable(${PROJECT_NAME} ${SRCS} ${HEADERS})
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 
-# Create a source list for tests. Exclude main.cpp, BaseWindow.cpp (window/
-# Vulkan), and Audio.cpp (ALSA/WASAPI) so plain tests need no audio backend.
+# Create a source list for tests. Exclude main.cpp and BaseWindow.cpp (window/
+# Vulkan). Audio.cpp is included because Video.cpp (FfmpegVideoSource) now
+# depends on Audio::AudioOutput for audio playback.
 set(TEST_SRCS ${SRCS})
-list(FILTER TEST_SRCS EXCLUDE REGEX "src/main.cpp$|src/BaseWindow.cpp$|src/Audio.cpp$")
+list(FILTER TEST_SRCS EXCLUDE REGEX "src/main.cpp$|src/BaseWindow.cpp$")
 
 # Net Test Target
 add_executable(TestNet test/test_net.cpp ${TEST_SRCS} ${HEADERS})
@@ -73,6 +74,10 @@ target_include_directories(TestFont PRIVATE include)
 add_executable(TestBrowser test/test_browser.cpp ${TEST_SRCS} ${HEADERS})
 target_include_directories(TestBrowser PRIVATE include)
 
+# PDF Test Target (PDF parser + renderer)
+add_executable(TestPdf test/test_pdf.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestPdf PRIVATE include)
+
 # JS Engine Test Target
 add_executable(TestJs test/test_js.cpp ${TEST_SRCS} ${HEADERS})
 target_include_directories(TestJs PRIVATE include)
@@ -92,7 +97,11 @@ target_include_directories(TestWindowPaint PRIVATE include)
 add_executable(TestBase64 test/test_base64.cpp ${TEST_SRCS} ${HEADERS})
 target_include_directories(TestBase64 PRIVATE include)
 
-set(ALL_TARGETS ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestAudio TestWindowPaint TestJs TestBase64)
+# Optimizer Test Target (recallable OpenCL optimize passes + timing)
+add_executable(TestOptimizer test/test_optimizer.cpp ${TEST_SRCS} ${HEADERS})
+target_include_directories(TestOptimizer PRIVATE include)
+
+set(ALL_TARGETS ${PROJECT_NAME} TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestPdf TestAudio TestWindowPaint TestJs TestBase64 TestOptimizer)
 
 # libxml2 is required by every target (the wrapper is part of the shared
 # sources). Apply its include dirs and libraries uniformly.
@@ -106,7 +115,7 @@ endforeach()
 # cross toolchains), Video.cpp falls back to the synthetic source. The video
 # decode path lives in src/Video.cpp behind DWV_HAVE_FFMPEG, which is part of
 # the shared sources, so apply to every target when available.
-pkg_check_modules(LIBAV IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
+pkg_check_modules(LIBAV IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 if(LIBAV_FOUND)
     message(STATUS "FFmpeg found: enabling video decode (DWV_HAVE_FFMPEG)")
     foreach(_target ${ALL_TARGETS})
@@ -156,7 +165,7 @@ if(WIN32)
     endforeach()
 
     # Links for the plain test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs TestBase64)
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestPdf TestJs TestBase64 TestOptimizer)
         target_link_libraries(${_target} PRIVATE user32 gdi32 OpenSSL::SSL OpenSSL::Crypto ws2_32)
         target_link_options(${_target} PRIVATE ${WIN_LINK_OPTIONS})
     endforeach()
@@ -171,6 +180,14 @@ else()
     pkg_check_modules(X11 REQUIRED x11)
     pkg_check_modules(ALSA REQUIRED alsa)
 
+    # Debugger.hpp (pulled in via Net.cpp, which is part of every target's
+    # sources) provides a native X11-drawn alert dialog, so every Linux target
+    # needs the X11 headers to compile and libX11 to link.
+    foreach(_target ${ALL_TARGETS})
+        target_include_directories(${_target} PRIVATE ${X11_INCLUDE_DIRS})
+        target_link_libraries(${_target} PRIVATE ${X11_LIBRARIES})
+    endforeach()
+
     # Links for main application and TestWindowPaint. The app includes Audio.cpp,
     # so it links the ALSA backend.
     foreach(_targetDesktop ${PROJECT_NAME} TestWindowPaint)
@@ -178,13 +195,10 @@ else()
         target_link_libraries(${_targetDesktop} PRIVATE ${X11_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto Vulkan::Vulkan ${ALSA_LIBRARIES})
     endforeach()
 
-    # Links for the plain test targets
-    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestJs TestBase64)
-        target_include_directories(${_target} PRIVATE ${OpenSSL_INCLUDE_DIRS})
-        target_link_libraries(${_target} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    # Links for the plain test targets (Audio.cpp is now part of TEST_SRCS,
+    # so every target needs ALSA for audio playback support).
+    foreach(_target TestNet TestWrapper TestCss TestLayout TestPaint TestImage TestSvg TestVideo TestFont TestBrowser TestPdf TestJs TestBase64 TestOptimizer TestAudio)
+        target_include_directories(${_target} PRIVATE ${OpenSSL_INCLUDE_DIRS} ${ALSA_INCLUDE_DIRS})
+        target_link_libraries(${_target} PRIVATE OpenSSL::SSL OpenSSL::Crypto ${ALSA_LIBRARIES})
     endforeach()
-
-    # Audio test: ALSA backend.
-    target_include_directories(TestAudio PRIVATE ${OpenSSL_INCLUDE_DIRS} ${ALSA_INCLUDE_DIRS})
-    target_link_libraries(TestAudio PRIVATE OpenSSL::SSL OpenSSL::Crypto ${ALSA_LIBRARIES})
 endif()

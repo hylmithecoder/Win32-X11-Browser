@@ -44,15 +44,21 @@ public:
   using KeyCallback = std::function<bool(const Key &)>;
   void SetKeyCallback(KeyCallback callback);
 
-  // A mouse event delivered to the application (e.g. for link clicking).
+  // A mouse event delivered to the application (e.g. for link clicking and
+  // drag-to-select). Move is only delivered while the primary button is held.
   struct MouseEvent {
-    enum Kind { ButtonDown, ButtonUp, ScrollUp, ScrollDown };
+    enum Kind { ButtonDown, ButtonUp, Move, ScrollUp, ScrollDown };
     Kind kind = ButtonDown;
     int x = 0;
     int y = 0;
   };
   using MouseCallback = std::function<bool(const MouseEvent &)>;
   void SetMouseCallback(MouseCallback callback);
+
+  // Offer `text` as the contents of the system clipboard (X11 PRIMARY and
+  // CLIPBOARD selections; the Windows clipboard). Called when a text selection
+  // completes so the user can paste it elsewhere.
+  void SetSelectionText(const std::string &text);
 
   // Open the window and run the event loop until the user closes it or presses
   // Escape. Blocks until the window closes.
@@ -116,6 +122,14 @@ private:
   Display *display = nullptr;
   Window window = 0;
   void Present(const Paint::Canvas &canvas);
+
+  // Clipboard: we take ownership of the PRIMARY and CLIPBOARD selections and
+  // serve `m_selectionText` in response to SelectionRequest events.
+  std::string m_selectionText;
+  Atom m_atomPrimary = 0;
+  Atom m_atomClipboard = 0;
+  Atom m_atomTargets = 0;
+  Atom m_atomUtf8 = 0;
 #endif
 };
 

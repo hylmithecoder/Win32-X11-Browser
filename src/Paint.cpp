@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
 #include <sstream>
 #include <unordered_map>
 

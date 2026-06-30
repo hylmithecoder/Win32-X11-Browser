@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace DesktopWebview {
 namespace Browser {
@@ -25,13 +26,13 @@ struct KeyInput {
 
 // Ties the engine together: fetch a URL, parse the DOM, load <img>/<video>
 // resources, style + lay out, and paint the page beneath a simple address-bar
-// chrome with an editable URL field.
+// browser with an editable URL field.
 class Browser {
 public:
   Browser();
 
-  // Height of the address-bar chrome drawn above the page.
-  static constexpr int kChromeHeight = 36;
+  // Height of the address-bar browser drawn above the page.
+  static constexpr int kBrowserHeight = 36;
 
   // Fetch `url` (http/https via Net, or a local file path), then load it.
   // Updates the address bar to the resolved URL. Returns false on fetch/parse
@@ -50,11 +51,23 @@ public:
   // view should be repainted (e.g. if navigation was triggered).
   bool handleClick(int x, int y);
 
+  // Mouse press / drag / release for text selection. A press starts a
+  // selection at the cursor; dragging extends it; a release with no drag is
+  // treated as a click (link activation). Each returns true if the view should
+  // be repainted.
+  bool handleMouseDown(int x, int y);
+  bool handleMouseMove(int x, int y);
+  bool handleMouseUp(int x, int y);
+
+  // The currently selected page text (empty if nothing is selected). The host
+  // window copies this to the system clipboard when a selection completes.
+  std::string selectedText() const;
+
   // Handle a scroll event with the given pixel delta. Returns true if the
   // view should be repainted.
   bool handleScroll(int delta);
 
-  // Render chrome + page into a fresh canvas of the given size.
+  // Render browser + page into a fresh canvas of the given size.
   Paint::Canvas render(int width, int height);
 
   const std::string &urlText() const { return m_urlText; }
@@ -62,9 +75,9 @@ public:
   void setUrlText(const std::string &text) { m_urlText = text; }
 
 private:
-  // Render just the page area (without chrome) into a canvas.
+  // Render just the page area (without browser) into a canvas.
   Paint::Canvas renderPage(int width, int height);
-  void drawChrome(Paint::Canvas &canvas, int width);
+  void drawBrowser(Paint::Canvas &canvas, int width);
 
   // Resolve `ref` against the current base URL into an absolute URL/path.
   std::string resolveUrl(const std::string &ref) const;
@@ -78,6 +91,40 @@ private:
   void annotateSizes(Layout::StyledNode &node);
   // Walk the layout tree compositing images, video placeholders, and text.
   void compositeContent(Paint::Canvas &canvas, const Layout::LayoutBox &box);
+
+  // ---- Text selection -----------------------------------------------------
+  // A run of selectable text: one text-leaf box, with its painted geometry in
+  // page-canvas coordinates.
+  struct TextRun {
+    Layout::Rect rect; // x=tx, y=content top, width=text width, height=line
+    std::string text;
+    int fontSize = 16;
+    int tx = 0;
+  };
+  // A caret position: an index into the text-run list plus a character offset.
+  struct SelPos {
+    int run = -1;
+    int ch = 0;
+  };
+
+  // True if `box` is a paintable text leaf; fills `out` with its run geometry.
+  // Mirrors the text branch of compositeContent so run indices line up.
+  bool textRunFor(const Layout::LayoutBox &box, TextRun &out) const;
+  // Pre-order collection of every text run, in paint order.
+  void collectTextRuns(const Layout::LayoutBox &box,
+                       std::vector<TextRun> &runs) const;
+  // Map a page-space point to the nearest caret position.
+  SelPos hitTest(const std::vector<TextRun> &runs, float px, float py) const;
+  // Re-run layout at the last rendered size and collect the current runs.
+  std::vector<TextRun> layoutTextRuns() const;
+  // Paint the selection highlight for the text run at paint index `runIdx`.
+  void paintSelection(Paint::Canvas &canvas, int runIdx,
+                      const TextRun &run) const;
+
+  SelPos m_selAnchor; // where the drag started
+  SelPos m_selFocus;  // where it currently ends
+  bool m_selecting = false;
+  int m_paintRunCursor = 0; // text-run counter during compositeContent
 
   std::string m_urlText;    // editable address-bar contents
   std::string m_currentUrl; // last successfully loaded URL (also the base)

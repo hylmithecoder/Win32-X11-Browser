@@ -202,12 +202,12 @@ std::array<Value, 4> ResolveBorder(const LayoutBox &box) {
 // User-agent default `display` for a subset of HTML tags.
 std::string DefaultDisplay(const std::string &tag) {
   static const std::vector<std::string> block = {
-      "html",  "body",    "div",     "p",          "h1",         "h2",
-      "h3",    "h4",      "h5",      "h6",         "ul",         "ol",
-      "li",    "section", "article", "header",     "footer",     "nav",
-      "main",  "aside",   "figure",  "figcaption", "blockquote", "pre",
-      "table", "form",    "hr",      "address",    "dl",         "dt",
-      "dd",    "fieldset"};
+      "html",  "body",     "div",     "p",          "h1",         "h2",
+      "h3",    "h4",       "h5",      "h6",         "ul",         "ol",
+      "li",    "section",  "article", "header",     "footer",     "nav",
+      "main",  "aside",    "figure",  "figcaption", "blockquote", "pre",
+      "table", "form",     "hr",      "address",    "dl",         "dt",
+      "dd",    "fieldset", "thead",   "tbody",      "tfoot",      "caption"};
   static const std::vector<std::string> none = {"head", "title",    "meta",
                                                 "link", "style",    "script",
                                                 "base", "noscript", "template"};
@@ -215,6 +215,14 @@ std::string DefaultDisplay(const std::string &tag) {
   std::string t = ToLower(tag);
   if (std::find(none.begin(), none.end(), t) != none.end()) {
     return "none";
+  }
+  // Table rows use flex so that <td>/<th> cells lay out horizontally.
+  if (t == "tr") {
+    return "flex";
+  }
+  // Table cells and header cells are block containers.
+  if (t == "td" || t == "th") {
+    return "block";
   }
   if (std::find(block.begin(), block.end(), t) != block.end()) {
     return "block";
@@ -245,6 +253,21 @@ LayoutBox BuildLayoutTree(const StyledNode &sn) {
   for (const StyledNode &child : sn.children) {
     std::string disp = child.display();
     if (disp == "none") {
+      continue;
+    }
+    // display: contents — transparent container; children become siblings.
+    if (disp == "contents") {
+      for (const StyledNode &gc : child.children) {
+        std::string gd = gc.display();
+        if (gd == "none") {
+          continue;
+        }
+        if (gd == "inline") {
+          InlineContainer(box).children.push_back(BuildLayoutTree(gc));
+        } else {
+          box.children.push_back(BuildLayoutTree(gc));
+        }
+      }
       continue;
     }
     if (disp == "inline") {

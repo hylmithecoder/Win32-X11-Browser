@@ -1,0 +1,65 @@
+{
+  "description": "File type configuration for DesktopWebview browser.",
+  "fileTypes": {
+    "html":  { "mime": "text/html",              "category": "page",     "inline": true,  "background": "#ffffff" },
+    "htm":   { "mime": "text/html",              "category": "page",     "inline": true,  "background": "#ffffff" },
+    "css":   { "mime": "text/css",               "category": "style",    "inline": true,  "background": "#ffffff" },
+    "js":    { "mime": "application/javascript",  "category": "script",  "inline": true,  "background": "#ffffff" },
+
+    "mp4":   { "mime": "video/mp4",               "category": "video",   "inline": true,  "background": "#202020" },
+    "webm":  { "mime": "video/webm",              "category": "video",   "inline": true,  "background": "#202020" },
+    "mkv":   { "mime": "video/x-matroska",        "category": "video",   "inline": true,  "background": "#202020" },
+    "avi":   { "mime": "video/x-msvideo",         "category": "video",   "inline": true,  "background": "#202020" },
+    "mov":   { "mime": "video/quicktime",         "category": "video",   "inline": true,  "background": "#202020" },
+    "m4v":   { "mime": "video/x-m4v",             "category": "video",   "inline": true,  "background": "#202020" },
+    "ogv":   { "mime": "video/ogg",               "category": "video",   "inline": true,  "background": "#202020" },
+    "rawv":  { "mime": "video/x-rawv",            "category": "video",   "inline": true,  "background": "#202020" },
+
+    "mp3":   { "mime": "audio/mpeg",              "category": "audio",   "inline": false, "background": "#1a1a2e" },
+    "wav":   { "mime": "audio/wav",               "category": "audio",   "inline": false, "background": "#1a1a2e" },
+    "ogg":   { "mime": "audio/ogg",               "category": "audio",   "inline": false, "background": "#1a1a2e" },
+    "flac":  { "mime": "audio/flac",              "category": "audio",   "inline": false, "background": "#1a1a2e" },
+    "aac":   { "mime": "audio/aac",               "category": "audio",   "inline": false, "background": "#1a1a2e" },
+    "m4a":   { "mime": "audio/mp4",               "category": "audio",   "inline": false, "background": "#1a1a2e" },
+
+    "png":   { "mime": "image/png",               "category": "image",   "inline": true,  "background": "#ffffff" },
+    "jpg":   { "mime": "image/jpeg",              "category": "image",   "inline": true,  "background": "#ffffff" },
+    "jpeg":  { "mime": "image/jpeg",              "category": "image",   "inline": true,  "background": "#ffffff" },
+    "gif":   { "mime": "image/gif",               "category": "image",   "inline": true,  "background": "#ffffff" },
+    "bmp":   { "mime": "image/bmp",               "category": "image",   "inline": true,  "background": "#ffffff" },
+    "ico":   { "mime": "image/x-icon",            "category": "image",   "inline": true,  "background": "#ffffff" },
+    "svg":   { "mime": "image/svg+xml",           "category": "image",   "inline": true,  "background": "#ffffff" },
+
+    "pdf":   { "mime": "application/pdf",          "category": "document","inline": false, "background": "#ffffff" },
+    "zip":   { "mime": "application/zip",          "category": "archive", "inline": false, "background": "#333333" },
+    "tar":   { "mime": "application/x-tar",        "category": "archive", "inline": false, "background": "#333333" },
+    "gz":    { "mime": "application/gzip",         "category": "archive", "inline": false, "background": "#333333" },
+    "rar":   { "mime": "application/vnd.rar",      "category": "archive", "inline": false, "background": "#333333" },
+    "7z":    { "mime": "application/x-7z-compressed","category": "archive", "inline": false, "background": "#333333" },
+    "exe":   { "mime": "application/x-msdownload", "category": "binary",  "inline": false, "background": "#2d2d2d" },
+    "bin":   { "mime": "application/octet-stream", "category": "binary",  "inline": false, "background": "#2d2d2d" },
+    "iso":   { "mime": "application/x-iso9660-image","category": "disc",  "inline": false, "background": "#2d2d2d" },
+
+    "md":    { "mime": "text/markdown",            "category": "document","inline": true,  "background": "#000000" },
+    "txt":   { "mime": "text/plain",              "category": "document","inline": true,  "background": "#000000" },
+    "env":   { "mime": "text/plain",              "category": "config",  "inline": true,  "background": "#000000" },
+    "ini":   { "mime": "text/plain",              "category": "config",  "inline": true,  "background": "#000000" },
+    "cfg":   { "mime": "text/plain",              "category": "config",  "inline": true,  "background": "#000000" },
+    "conf":  { "mime": "text/plain",              "category": "config",  "inline": true,  "background": "#000000" },
+    "log":   { "mime": "text/plain",              "category": "log",     "inline": true,  "background": "#000000" },
+    "yml":   { "mime": "text/yaml",               "category": "config",  "inline": true,  "background": "#000000" },
+    "yaml":  { "mime": "text/yaml",               "category": "config",  "inline": true,  "background": "#000000" },
+    "toml":  { "mime": "text/toml",               "category": "config",  "inline": true,  "background": "#000000" },
+
+    "json":  { "mime": "application/json",        "category": "data",    "inline": true,  "background": "#1e1e1e" },
+    "xml":   { "mime": "application/xml",         "category": "data",    "inline": true,  "background": "#1e1e1e" },
+
+    "sh":    { "mime": "application/x-sh",        "category": "script",  "inline": true,  "background": "#1e1e1e" },
+    "bat":   { "mime": "application/x-msdos-program","category": "script","inline": true,  "background": "#1e1e1e" },
+    "py":    { "mime": "text/x-python",           "category": "code",    "inline": true,  "background": "#1e1e1e" },
+    "cpp":   { "mime": "text/x-c++src",           "category": "code",    "inline": true,  "background": "#1e1e1e" },
+    "hpp":   { "mime": "text/x-c++hdr",           "category": "code",    "inline": true,  "background": "#1e1e1e" },
+    "c":     { "mime": "text/x-csrc",             "category": "code",    "inline": true,  "background": "#1e1e1e" },
+    "h":     { "mime": "text/x-chdr",             "category": "code",    "inline": true,  "background": "#1e1e1e" }
+  }
+}

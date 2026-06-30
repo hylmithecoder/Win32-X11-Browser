@@ -1,5 +1,7 @@
 #include "../include/Browser.hpp"
 #include "../include/Base64.hpp"
+#include "../include/Debugger.hpp"
+#include "../include/Documents.hpp"
 #include "../include/Font.hpp"
 #include "../include/JsEngine.hpp"
 #include "../include/Net.hpp"
@@ -11,6 +13,8 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+
+using namespace Debug;
 
 namespace DesktopWebview {
 namespace Browser {
@@ -128,24 +132,141 @@ bool IsVideoExtension(const std::string &ext) {
          ext == "mov" || ext == "m4v" || ext == "ogv";
 }
 
-// For media/binary resources we cannot render inline, return a human label
-// (e.g. "MP4 video"); empty string means "treat as an HTML document".
-std::string StandaloneMediaLabel(const std::string &ext) {
-  if (IsVideoExtension(ext)) {
-    return ext == "mp4" ? "MP4 video" : (ext + " video");
+// True for raster image extensions the Image decoder (stb_image) can handle.
+bool IsImageExtension(const std::string &ext) {
+  return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
+         ext == "bmp" || ext == "ico";
+}
+
+// Heuristically decide whether a fetched body is HTML. Used for URLs without a
+// usable file extension (e.g. "http://localhost/" or clean routes like
+// "/about"), where the renderer cannot key the document type off the extension.
+// Sniffing is only applied in that case, so files with an explicit extension
+// keep their declared type.
+bool LooksLikeHtml(const std::vector<std::uint8_t> &bytes) {
+  size_t i = 0;
+  // Skip a UTF-8 BOM and any leading whitespace.
+  if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB &&
+      bytes[2] == 0xBF) {
+    i = 3;
   }
-  if (ext == "mp3" || ext == "wav" || ext == "ogg" || ext == "flac" ||
-      ext == "aac" || ext == "m4a") {
-    return ext + " audio";
+  while (i < bytes.size() &&
+         std::isspace(static_cast<unsigned char>(bytes[i]))) {
+    ++i;
   }
-  if (ext == "pdf") {
-    return "PDF document";
+  // Markup must start with '<'.
+  if (i >= bytes.size() || bytes[i] != '<') {
+    return false;
   }
-  if (ext == "zip" || ext == "tar" || ext == "gz" || ext == "rar" ||
-      ext == "7z" || ext == "exe" || ext == "bin" || ext == "iso") {
-    return ext + " file";
+  // Lowercase a short prefix and look for a common HTML signature.
+  size_t n = std::min(bytes.size() - i, static_cast<size_t>(512));
+  std::string head;
+  head.reserve(n);
+  for (size_t k = i; k < i + n; ++k) {
+    head +=
+        static_cast<char>(std::tolower(static_cast<unsigned char>(bytes[k])));
   }
-  return "";
+  static const char *kSignatures[] = {"<!doctype html",
+                                      "<html",
+                                      "<head",
+                                      "<body",
+                                      "<meta",
+                                      "<title",
+                                      "<div",
+                                      "<p>",
+                                      "<p ",
+                                      "<span",
+                                      "<table",
+                                      "<ul",
+                                      "<ol",
+                                      "<h1",
+                                      "<h2",
+                                      "<a ",
+                                      "<!--",
+                                      "<script"};
+  for (const char *sig : kSignatures) {
+    if (head.find(sig) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// File type information matching assets/filetypes.json.
+struct FileTypeInfo {
+  const char *label;
+  const char *mime;
+  const char *bg; // background color (hex)
+  bool inlineDisplay;
+};
+
+const FileTypeInfo *LookupFileType(const std::string &ext) {
+  static const std::map<std::string, FileTypeInfo> kTypes = {
+      {"html", {"HTML page", "text/html", "#ffffff", true}},
+      {"htm", {"HTML page", "text/html", "#ffffff", true}},
+      {"css", {"CSS stylesheet", "text/css", "#000000ff", true}},
+      {"js", {"JavaScript", "application/javascript", "#000000ff", true}},
+
+      {"mp4", {"MP4 video", "video/mp4", "#202020", true}},
+      {"webm", {"WebM video", "video/webm", "#202020", true}},
+      {"mkv", {"Matroska video", "video/x-matroska", "#202020", true}},
+      {"avi", {"AVI video", "video/x-msvideo", "#202020", true}},
+      {"mov", {"QuickTime video", "video/quicktime", "#202020", true}},
+      {"m4v", {"MPEG-4 video", "video/x-m4v", "#202020", true}},
+      {"ogv", {"Ogg video", "video/ogg", "#202020", true}},
+      {"rawv", {"Raw video", "video/x-rawv", "#202020", true}},
+
+      {"mp3", {"MP3 audio", "audio/mpeg", "#1a1a2e", false}},
+      {"wav", {"WAV audio", "audio/wav", "#1a1a2e", false}},
+      {"ogg", {"Ogg audio", "audio/ogg", "#1a1a2e", false}},
+      {"flac", {"FLAC audio", "audio/flac", "#1a1a2e", false}},
+      {"aac", {"AAC audio", "audio/aac", "#1a1a2e", false}},
+      {"m4a", {"MPEG-4 audio", "audio/mp4", "#1a1a2e", false}},
+
+      {"png", {"PNG image", "image/png", "#ffffff", true}},
+      {"jpg", {"JPEG image", "image/jpeg", "#ffffff", true}},
+      {"jpeg", {"JPEG image", "image/jpeg", "#ffffff", true}},
+      {"gif", {"GIF image", "image/gif", "#ffffff", true}},
+      {"bmp", {"BMP image", "image/bmp", "#ffffff", true}},
+      {"ico", {"Icon", "image/x-icon", "#ffffff", true}},
+      {"svg", {"SVG image", "image/svg+xml", "#ffffff", true}},
+
+      {"pdf", {"PDF document", "application/pdf", "#ffffff", false}},
+      {"zip", {"ZIP archive", "application/zip", "#333333", false}},
+      {"tar", {"TAR archive", "application/x-tar", "#333333", false}},
+      {"gz", {"GZip archive", "application/gzip", "#333333", false}},
+      {"rar", {"RAR archive", "application/vnd.rar", "#333333", false}},
+      {"7z",
+       {"7-Zip archive", "application/x-7z-compressed", "#333333", false}},
+      {"exe",
+       {"Windows executable", "application/x-msdownload", "#2d2d2d", false}},
+      {"bin", {"Binary file", "application/octet-stream", "#2d2d2d", false}},
+      {"iso", {"Disc image", "application/x-iso9660-image", "#2d2d2d", false}},
+
+      {"md", {"Markdown document", "text/markdown", "#000000", true}},
+      {"txt", {"Text file", "text/plain", "#000000", true}},
+      {"env", {"Environment config", "text/plain", "#000000", true}},
+      {"ini", {"INI config", "text/plain", "#000000", true}},
+      {"cfg", {"Config file", "text/plain", "#000000", true}},
+      {"conf", {"Config file", "text/plain", "#000000", true}},
+      {"log", {"Log file", "text/plain", "#000000", true}},
+      {"yml", {"YAML config", "text/yaml", "#000000", true}},
+      {"yaml", {"YAML config", "text/yaml", "#000000", true}},
+      {"toml", {"TOML config", "text/toml", "#000000", true}},
+
+      {"json", {"JSON data", "application/json", "#1e1e1e", true}},
+      {"xml", {"XML data", "application/xml", "#1e1e1e", true}},
+
+      {"sh", {"Shell script", "application/x-sh", "#1e1e1e", true}},
+      {"bat", {"Batch script", "application/x-msdos-program", "#1e1e1e", true}},
+      {"py", {"Python script", "text/x-python", "#1e1e1e", true}},
+      {"cpp", {"C++ source", "text/x-c++src", "#1e1e1e", true}},
+      {"hpp", {"C++ header", "text/x-c++hdr", "#1e1e1e", true}},
+      {"c", {"C source", "text/x-csrc", "#1e1e1e", true}},
+      {"h", {"C header", "text/x-chdr", "#1e1e1e", true}},
+  };
+  auto it = kTypes.find(ext);
+  return it != kTypes.end() ? &it->second : nullptr;
 }
 
 // Rendered text size (pixel height) per tag.
@@ -249,6 +370,48 @@ void StrokeRect(Paint::Canvas &c, int x, int y, int w, int h,
   FillRect(c, x + w - 1, y, 1, h, col);
 }
 
+// Encode an Image::Bitmap to a BMP byte stream (for data URIs).
+std::vector<std::uint8_t> EncodeBmp(const Image::Bitmap &bmp) {
+  int rowBytes = ((bmp.width * 24 + 31) / 32) * 4;
+  int pixelOff = 14 + 40;
+  int fileSize = pixelOff + rowBytes * bmp.height;
+  std::vector<std::uint8_t> out(fileSize);
+
+  out[0] = 'B';
+  out[1] = 'M';
+  auto put32 = [&](size_t off, uint32_t v) {
+    out[off] = static_cast<uint8_t>(v & 0xff);
+    out[off + 1] = static_cast<uint8_t>((v >> 8) & 0xff);
+    out[off + 2] = static_cast<uint8_t>((v >> 16) & 0xff);
+    out[off + 3] = static_cast<uint8_t>((v >> 24) & 0xff);
+  };
+  auto put16 = [&](size_t off, uint16_t v) {
+    out[off] = static_cast<uint8_t>(v & 0xff);
+    out[off + 1] = static_cast<uint8_t>((v >> 8) & 0xff);
+  };
+
+  put32(2, fileSize);
+  put32(10, pixelOff);
+  put32(14, 40);
+  put32(18, static_cast<uint32_t>(bmp.width));
+  put32(22, static_cast<uint32_t>(bmp.height));
+  put16(26, 1);
+  put16(28, 24);
+  put32(34, rowBytes * bmp.height);
+
+  for (int y = 0; y < bmp.height; ++y) {
+    int srcY = bmp.height - 1 - y;
+    for (int x = 0; x < bmp.width; ++x) {
+      Paint::Color c = bmp.at(x, srcY);
+      size_t o = static_cast<size_t>(pixelOff) + y * rowBytes + x * 3;
+      out[o] = c.b;
+      out[o + 1] = c.g;
+      out[o + 2] = c.r;
+    }
+  }
+  return out;
+}
+
 } // namespace
 
 Browser::Browser() : m_status("No page loaded") {
@@ -261,6 +424,8 @@ Browser::Browser() : m_status("No page loaded") {
 // ---------------------------------------------------------------------------
 
 std::string Browser::resolveUrl(const std::string &ref) const {
+  // DEBUG_LOGF("Browser::resolveUrl(ref: %s)", LogLevel::INFO, ref.c_str());
+
   if (ref.empty()) {
     return "";
   }
@@ -362,6 +527,8 @@ bool Browser::fetchResource(const std::string &absUrl,
 // ---------------------------------------------------------------------------
 
 bool Browser::navigate(const std::string &url) {
+  DEBUG_LOGF("Navigating to: %s", LogLevel::INFO, url.c_str());
+
   std::string target = url;
   // Bare host like "localhost:8080" -> assume http.
   if (target.find("://") == std::string::npos && !target.empty() &&
@@ -398,20 +565,141 @@ bool Browser::navigate(const std::string &url) {
     return loadHtml(page, target);
   }
 
-  // Other media / binary files we cannot render inline (audio/pdf/archives):
-  // show a small placeholder page instead of parsing bytes as HTML.
-  std::string label = StandaloneMediaLabel(ext);
-  if (!label.empty()) {
-    std::string page =
-        "<html><head><title>" + label + "</title></head><body><h1>" + label +
-        "</h1>" + "<p>This file type cannot be displayed yet.</p>" + "<p>" +
-        target + "</p>" + "<p>" + std::to_string(bytes.size()) +
-        " bytes downloaded.</p></body></html>";
+  // HTML files are parsed and rendered as documents, not shown as raw text.
+  // Extensionless URLs ("/", "/about", ...) have no extension to key off, so we
+  // sniff the body and treat it as HTML when it looks like markup.
+  if (ext == "html" || ext == "htm" || ext == "php" ||
+      (ext.empty() && LooksLikeHtml(bytes))) {
+    std::string html(reinterpret_cast<const char *>(bytes.data()),
+                     bytes.size());
+    return loadHtml(html, target);
+  }
+
+  // Directly-opened raster image (e.g. an .png): wrap it in an <img> element so
+  // the decode + blit pipeline renders the picture instead of dumping the raw
+  // bytes as text.
+  if (IsImageExtension(ext)) {
+    std::string page = "<html><head><title>" + target +
+                       "</title></head><body style=\"margin:0\">"
+                       "<img src=\"" +
+                       target + "\"></body></html>";
     return loadHtml(page, target);
   }
 
-  std::string html(bytes.begin(), bytes.end());
-  return loadHtml(html, target);
+  // PDF: render the first page to a bitmap and display as an <img>.
+  if (ext == "pdf") {
+    Image::Bitmap bmp;
+    if (Documents::renderPdfToBitmap(bytes, bmp, 0)) {
+      std::vector<std::uint8_t> bmpFile = EncodeBmp(bmp);
+      std::string dataUri = "data:image/bmp;base64," +
+                            Base64::encode(bmpFile.data(), bmpFile.size());
+      int totalPages = Documents::pdfPageCount(bytes);
+      std::string page =
+          "<html><head><title>" + target +
+          "</title>"
+          "<style>body{margin:0;background:#ccc;text-align:center;"
+          "font-family:sans-serif;font-size:13px;color:#333;}"
+          "img{display:block;margin:0 auto;}</style>"
+          "</head><body>"
+          "<div style=\"padding:6px;background:#f5f5f5;border-bottom:1px "
+          "solid #aaa;\">" +
+          std::to_string(totalPages) + " halaman &mdash; " + target +
+          "</div>"
+          "<img src=\"" +
+          dataUri + "\"></body></html>";
+      return loadHtml(page, target);
+    }
+    // Fall through to generic unknown-file handler below.
+  }
+
+  // Check file type configuration for non-video media.
+  const FileTypeInfo *ft = LookupFileType(ext);
+  if (ft) {
+    if (ft->inlineDisplay) {
+      // For text-like files (md, txt, env, code, etc.), show the raw content
+      // with a dark background. For other inline types (images, SVG) this path
+      // is not reached because they are rendered as <img> in the HTML; we keep
+      // the check for future use.
+      std::string bodyText(reinterpret_cast<const char *>(bytes.data()),
+                           bytes.size());
+      // Escape HTML special characters for safe display.
+      std::string escaped;
+      escaped.reserve(bodyText.size());
+      for (unsigned char c : bodyText) {
+        if (c == '&')
+          escaped += "&amp;";
+        else if (c == '<')
+          escaped += "&lt;";
+        else if (c == '>')
+          escaped += "&gt;";
+        else
+          escaped += c;
+      }
+      std::string page =
+          "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>" +
+          std::string(ft->label) +
+          "</title>"
+          "<style>"
+          "body { margin:0; background:" +
+          std::string(ft->bg) +
+          ";"
+          " color:#e0e0e0; font-family:monospace; font-size:14px; }"
+          "pre { margin:16px; white-space:pre-wrap; word-wrap:break-word; }"
+          "</style></head><body><pre>" +
+          escaped + "</pre></body></html>";
+      return loadHtml(page, target);
+    }
+    // Non-inline types (audio, archives, binaries): show a placeholder page.
+    std::string page =
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>" +
+        std::string(ft->label) +
+        "</title>"
+        "<style>"
+        "body { margin:40px; background:" +
+        std::string(ft->bg) +
+        ";"
+        " color:#e0e0e0; font-family:sans-serif; text-align:center; }"
+        "h1 { font-size:24px; }"
+        "p { font-size:14px; color:#aaa; }"
+        "</style></head><body>"
+        "<h1>" +
+        std::string(ft->label) +
+        "</h1>"
+        "<p>This file type cannot be displayed inline.</p>"
+        "<p>" +
+        target +
+        "</p>"
+        "<p>" +
+        std::to_string(bytes.size()) +
+        " bytes.</p>"
+        "</body></html>";
+    return loadHtml(page, target);
+  }
+
+  // Unknown file type: show raw content with dark background + white text.
+  std::string bodyText(reinterpret_cast<const char *>(bytes.data()),
+                       bytes.size());
+  std::string escaped;
+  escaped.reserve(bodyText.size());
+  for (unsigned char c : bodyText) {
+    if (c == '&')
+      escaped += "&amp;";
+    else if (c == '<')
+      escaped += "&lt;";
+    else if (c == '>')
+      escaped += "&gt;";
+    else
+      escaped += c;
+  }
+  std::string page =
+      "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+      "<style>"
+      "body { margin:0; background:#000000; color:#ffffff; "
+      "font-family:monospace; font-size:14px; }"
+      "pre { margin:16px; white-space:pre-wrap; word-wrap:break-word; }"
+      "</style></head><body><pre>" +
+      escaped + "</pre></body></html>";
+  return loadHtml(page, target);
 }
 
 bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
@@ -422,6 +710,10 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   }
   m_currentUrl = baseUrl;
   m_scrollY = 0.0f;
+  // A new document invalidates any text selection.
+  m_selecting = false;
+  m_selAnchor = SelPos{};
+  m_selFocus = SelPos{};
   if (baseUrl.rfind("http://", 0) == 0) {
     m_urlText = baseUrl.substr(7);
   } else {
@@ -436,6 +728,7 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     std::string rel = ToLower(link.attribute("rel"));
     if (rel == "stylesheet") {
       std::string href = link.attribute("href");
+      DEBUG_LOG("[Browser] Loading stylesheet: %s", href.c_str());
       if (!href.empty()) {
         std::string absHref = resolveUrl(href);
         std::vector<std::uint8_t> data;
@@ -474,6 +767,12 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   preload("src", "img");
   preload("poster", "video");
 
+  // Stop audio on any previously playing videos.
+  for (auto &[u, src] : m_videos) {
+    if (src) {
+      src->stopAudio();
+    }
+  }
   m_videos.clear();
   for (const Wrapper::Node &el : m_doc.getElementsByTagName("video")) {
     std::string src = el.attribute("src");
@@ -489,6 +788,13 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     // sources we pass the URL straight to ffmpeg (it has its own protocol
     // handlers); local paths/file:// are opened directly.
     m_videos[abs] = Video::openVideoFile(abs);
+  }
+
+  // Start audio playback for any videos that have an audio track.
+  for (auto &[u, src] : m_videos) {
+    if (src) {
+      src->startAudio();
+    }
   }
 
   m_startTime = std::chrono::steady_clock::now();
@@ -819,27 +1125,23 @@ void Browser::compositeContent(Paint::Canvas &canvas,
         }
       }
     } else if (box.children.empty()) {
-      std::string text = CollapseWhitespace(el.text());
-      if (!text.empty()) {
+      TextRun run;
+      if (textRunFor(box, run)) {
+        int runIdx = m_paintRunCursor++;
+
         Paint::Color col;
         std::string colStr =
             ResolveInheritedPropertyForDomNode(el, "color", m_sheet);
         if (colStr.empty() || !Paint::parseColor(colStr, col)) {
           col = kBlack;
         }
-        int fontSize =
-            ResolveFontSizeForDomNode(el, m_sheet, TextSizeFor(name));
-        std::string align = ToLower(
-            ResolveInheritedPropertyForDomNode(el, "text-align", m_sheet));
-        int tx = static_cast<int>(c.x);
-        if (align == "center") {
-          int textW = Font::textWidth(text, fontSize);
-          tx += std::max(0, (static_cast<int>(c.width) - textW) / 2);
-        } else if (align == "right") {
-          int textW = Font::textWidth(text, fontSize);
-          tx += std::max(0, static_cast<int>(c.width) - textW);
-        }
-        Font::drawText(canvas, tx, static_cast<int>(c.y), text, col, fontSize);
+
+        // Draw the selection highlight (if this run is within the active
+        // selection range) behind the glyphs.
+        paintSelection(canvas, runIdx, run);
+
+        Font::drawText(canvas, run.tx, static_cast<int>(run.rect.y), run.text,
+                       col, run.fontSize);
       }
     }
   }
@@ -867,17 +1169,18 @@ Paint::Canvas Browser::renderPage(int width, int height) {
                                          static_cast<float>(height));
   Paint::DisplayList list = Paint::buildDisplayList(box);
   page.paint(list);
+  m_paintRunCursor = 0; // index text runs in paint order for selection
   compositeContent(page, box);
   return page;
 }
 
-void Browser::drawChrome(Paint::Canvas &canvas, int width) {
+void Browser::drawBrowser(Paint::Canvas &canvas, int width) {
   Paint::Color barBg{0xdd, 0xdd, 0xdd, 255};
   Paint::Color border{0x88, 0x88, 0x88, 255};
 
-  FillRect(canvas, 0, 0, width, kChromeHeight, barBg);
+  FillRect(canvas, 0, 0, width, kBrowserHeight, barBg);
 
-  int ix = 8, iy = 6, iw = width - 16, ih = kChromeHeight - 12;
+  int ix = 8, iy = 6, iw = width - 16, ih = kBrowserHeight - 12;
   if (iw < 1) {
     iw = 1;
   }
@@ -899,8 +1202,8 @@ void Browser::drawChrome(Paint::Canvas &canvas, int width) {
   }
   Font::drawText(canvas, ix + 4, ty, displayUrl, kBlack, px);
 
-  // Separator under the chrome.
-  FillRect(canvas, 0, kChromeHeight - 1, width, 1, border);
+  // Separator under the browser.
+  FillRect(canvas, 0, kBrowserHeight - 1, width, 1, border);
 }
 
 Paint::Canvas Browser::render(int width, int height) {
@@ -916,12 +1219,12 @@ Paint::Canvas Browser::render(int width, int height) {
   Paint::Canvas canvas(width, height);
   canvas.clear(kWhite);
 
-  int pageViewportH = std::max(1, height - kChromeHeight);
+  int pageViewportH = std::max(1, height - kBrowserHeight);
 
   if (!m_hasDoc) {
-    Font::drawText(canvas, 8, kChromeHeight + 8,
+    Font::drawText(canvas, 8, kBrowserHeight + 8,
                    m_status.empty() ? "No page loaded" : m_status, kBlack, 18);
-    drawChrome(canvas, width);
+    drawBrowser(canvas, width);
     return canvas;
   }
 
@@ -950,12 +1253,12 @@ Paint::Canvas Browser::render(int width, int height) {
     int srcY = startY + y;
     if (srcY >= 0 && srcY < pageCanvasH) {
       for (int x = 0; x < width; ++x) {
-        canvas.blendPixel(x, y + kChromeHeight, page.at(x, srcY));
+        canvas.blendPixel(x, y + kBrowserHeight, page.at(x, srcY));
       }
     }
   }
 
-  drawChrome(canvas, width);
+  drawBrowser(canvas, width);
   return canvas;
 }
 
@@ -984,23 +1287,44 @@ const Layout::LayoutBox *FindBoxAt(const Layout::LayoutBox &box, float px,
   return &box;
 }
 
+// Text-selection highlight colour (light blue, drawn behind selected glyphs).
+const Paint::Color kSelectionBg{0xb3, 0xd7, 0xff, 255};
+
+// Character index in `text` nearest to page-x `px`, given the run's left edge
+// `tx` and font size. Splits on each glyph's midpoint so the caret snaps to the
+// closer side.
+int CharIndexAtX(const std::string &text, int fontSize, int tx, float px) {
+  if (px <= tx) {
+    return 0;
+  }
+  for (size_t i = 1; i <= text.size(); ++i) {
+    int w = Font::textWidth(text.substr(0, i), fontSize);
+    if (tx + w >= px) {
+      int wPrev = Font::textWidth(text.substr(0, i - 1), fontSize);
+      float mid = tx + (wPrev + w) / 2.0f;
+      return (px < mid) ? static_cast<int>(i - 1) : static_cast<int>(i);
+    }
+  }
+  return static_cast<int>(text.size());
+}
+
 } // namespace
 
 bool Browser::handleClick(int x, int y) {
-  if (y < kChromeHeight) {
-    return false; // clicked in chrome area
+  if (y < kBrowserHeight) {
+    return false; // clicked in browser area
   }
   if (!m_hasDoc) {
     return false;
   }
 
   // Re-run layout to find where elements are.
-  int pageH = std::max(1, m_lastHeight - kChromeHeight);
+  int pageH = std::max(1, m_lastHeight - kBrowserHeight);
   Layout::LayoutBox box = Layout::layout(
       m_style, static_cast<float>(m_lastWidth), static_cast<float>(pageH));
 
   float px = static_cast<float>(x);
-  float py = static_cast<float>(y - kChromeHeight) + m_scrollY;
+  float py = static_cast<float>(y - kBrowserHeight) + m_scrollY;
 
   const Layout::LayoutBox *found = FindBoxAt(box, px, py);
   if (found && found->node) {
@@ -1017,6 +1341,219 @@ bool Browser::handleClick(int x, int y) {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Text selection
+// ---------------------------------------------------------------------------
+
+bool Browser::textRunFor(const Layout::LayoutBox &box, TextRun &out) const {
+  if (!box.node || !box.node->node.isElement()) {
+    return false;
+  }
+  if (!box.children.empty()) {
+    return false;
+  }
+  const Wrapper::Node &el = box.node->node;
+  std::string name = ToLower(el.name());
+  // Replaced elements paint their own content, not selectable text.
+  if (name == "img" || name == "video" || name == "input" ||
+      name == "textarea" || name == "button" || name == "select") {
+    return false;
+  }
+  std::string text = CollapseWhitespace(el.text());
+  if (text.empty()) {
+    return false;
+  }
+  const Layout::Rect &c = box.dimensions.content;
+  int fontSize = ResolveFontSizeForDomNode(el, m_sheet, TextSizeFor(name));
+  std::string align =
+      ToLower(ResolveInheritedPropertyForDomNode(el, "text-align", m_sheet));
+  int tx = static_cast<int>(c.x);
+  int textW = Font::textWidth(text, fontSize);
+  if (align == "center") {
+    tx += std::max(0, (static_cast<int>(c.width) - textW) / 2);
+  } else if (align == "right") {
+    tx += std::max(0, static_cast<int>(c.width) - textW);
+  }
+  out.text = text;
+  out.fontSize = fontSize;
+  out.tx = tx;
+  out.rect.x = static_cast<float>(tx);
+  out.rect.y = c.y;
+  out.rect.width = static_cast<float>(textW);
+  out.rect.height = static_cast<float>(Font::lineHeight(fontSize));
+  return true;
+}
+
+void Browser::collectTextRuns(const Layout::LayoutBox &box,
+                              std::vector<TextRun> &runs) const {
+  TextRun run;
+  if (textRunFor(box, run)) {
+    runs.push_back(run);
+  }
+  for (const Layout::LayoutBox &child : box.children) {
+    collectTextRuns(child, runs);
+  }
+}
+
+std::vector<Browser::TextRun> Browser::layoutTextRuns() const {
+  std::vector<TextRun> runs;
+  if (!m_hasDoc) {
+    return runs;
+  }
+  int pageH = std::max(1, m_lastHeight - kBrowserHeight);
+  Layout::LayoutBox box = Layout::layout(
+      m_style, static_cast<float>(m_lastWidth), static_cast<float>(pageH));
+  collectTextRuns(box, runs);
+  return runs;
+}
+
+Browser::SelPos Browser::hitTest(const std::vector<TextRun> &runs, float px,
+                                 float py) const {
+  SelPos best;
+  // 1. Prefer a run whose vertical band contains py; pick the closest in x.
+  float bestDx = 0.0f;
+  for (size_t i = 0; i < runs.size(); ++i) {
+    const TextRun &r = runs[i];
+    if (py < r.rect.y || py > r.rect.y + r.rect.height) {
+      continue;
+    }
+    float dx = 0.0f;
+    if (px < r.rect.x) {
+      dx = r.rect.x - px;
+    } else if (px > r.rect.x + r.rect.width) {
+      dx = px - (r.rect.x + r.rect.width);
+    }
+    if (best.run < 0 || dx < bestDx) {
+      best.run = static_cast<int>(i);
+      best.ch = CharIndexAtX(r.text, r.fontSize, r.tx, px);
+      bestDx = dx;
+    }
+  }
+  if (best.run >= 0) {
+    return best;
+  }
+  // 2. No run on this line: snap to the vertically nearest run, resolving the
+  // column from px so a drag that strays above/below a line still extends
+  // horizontally along the closest line.
+  float bestDy = 0.0f;
+  for (size_t i = 0; i < runs.size(); ++i) {
+    const TextRun &r = runs[i];
+    float cy = r.rect.y + r.rect.height / 2.0f;
+    float dy = std::abs(py - cy);
+    if (best.run < 0 || dy < bestDy) {
+      best.run = static_cast<int>(i);
+      best.ch = CharIndexAtX(r.text, r.fontSize, r.tx, px);
+      bestDy = dy;
+    }
+  }
+  return best;
+}
+
+bool Browser::handleMouseDown(int x, int y) {
+  if (y < kBrowserHeight || !m_hasDoc) {
+    m_selecting = false;
+    m_selAnchor = SelPos{};
+    m_selFocus = SelPos{};
+    return false;
+  }
+  float px = static_cast<float>(x);
+  float py = static_cast<float>(y - kBrowserHeight) + m_scrollY;
+  std::vector<TextRun> runs = layoutTextRuns();
+  SelPos pos = hitTest(runs, px, py);
+  m_selAnchor = pos;
+  m_selFocus = pos;
+  m_selecting = true;
+  return true; // clears any previous highlight
+}
+
+bool Browser::handleMouseMove(int x, int y) {
+  if (!m_selecting || !m_hasDoc) {
+    return false;
+  }
+  float px = static_cast<float>(x);
+  float py = static_cast<float>(y - kBrowserHeight) + m_scrollY;
+  std::vector<TextRun> runs = layoutTextRuns();
+  m_selFocus = hitTest(runs, px, py);
+  return true;
+}
+
+bool Browser::handleMouseUp(int x, int y) {
+  if (!m_selecting) {
+    return false;
+  }
+  m_selecting = false;
+  // No drag (anchor == focus): treat as a click, e.g. activating a link.
+  if (m_selAnchor.run == m_selFocus.run && m_selAnchor.ch == m_selFocus.ch) {
+    m_selAnchor = SelPos{};
+    m_selFocus = SelPos{};
+    return handleClick(x, y);
+  }
+  return true; // a real selection now exists
+}
+
+std::string Browser::selectedText() const {
+  if (m_selAnchor.run < 0) {
+    return "";
+  }
+  SelPos s = m_selAnchor, e = m_selFocus;
+  if (s.run > e.run || (s.run == e.run && s.ch > e.ch)) {
+    std::swap(s, e);
+  }
+  if (s.run == e.run && s.ch == e.ch) {
+    return "";
+  }
+  std::vector<TextRun> runs = layoutTextRuns();
+  if (s.run >= static_cast<int>(runs.size())) {
+    return "";
+  }
+  e.run = std::min(e.run, static_cast<int>(runs.size()) - 1);
+  std::string out;
+  for (int i = s.run; i <= e.run; ++i) {
+    const std::string &t = runs[i].text;
+    int from = (i == s.run) ? s.ch : 0;
+    int to = (i == e.run) ? e.ch : static_cast<int>(t.size());
+    from = std::clamp(from, 0, static_cast<int>(t.size()));
+    to = std::clamp(to, 0, static_cast<int>(t.size()));
+    if (from > to) {
+      std::swap(from, to);
+    }
+    if (i > s.run) {
+      out += "\n";
+    }
+    out += t.substr(from, to - from);
+  }
+  return out;
+}
+
+void Browser::paintSelection(Paint::Canvas &canvas, int runIdx,
+                             const TextRun &run) const {
+  if (m_selAnchor.run < 0) {
+    return;
+  }
+  SelPos s = m_selAnchor, e = m_selFocus;
+  if (s.run > e.run || (s.run == e.run && s.ch > e.ch)) {
+    std::swap(s, e);
+  }
+  if (s.run == e.run && s.ch == e.ch) {
+    return; // empty selection
+  }
+  if (runIdx < s.run || runIdx > e.run) {
+    return;
+  }
+  int n = static_cast<int>(run.text.size());
+  int from = (runIdx == s.run) ? s.ch : 0;
+  int to = (runIdx == e.run) ? e.ch : n;
+  from = std::clamp(from, 0, n);
+  to = std::clamp(to, 0, n);
+  if (from > to) {
+    std::swap(from, to);
+  }
+  int x0 = run.tx + Font::textWidth(run.text.substr(0, from), run.fontSize);
+  int x1 = run.tx + Font::textWidth(run.text.substr(0, to), run.fontSize);
+  FillRect(canvas, x0, static_cast<int>(run.rect.y), std::max(1, x1 - x0),
+           static_cast<int>(run.rect.height), kSelectionBg);
 }
 
 bool Browser::handleKey(const KeyInput &key) {

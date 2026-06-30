@@ -70,17 +70,17 @@ int main() {
             << std::endl;
 
   const int W = 400, H = 300;
-  const int chrome = Browser::Browser::kChromeHeight;
+  const int browser = Browser::Browser::kBrowserHeight;
 
   // --- empty state ---------------------------------------------------------
   {
     Browser::Browser b;
     Paint::Canvas c = b.render(W, H);
-    Check("empty: chrome bar drawn at top",
+    Check("empty: browser bar drawn at top",
           FindColor(c, 0, 0, W, 4, 0xdd, 0xdd, 0xdd));
-    Check(
-        "empty: status text shown below chrome",
-        AnyNonBackground(c, 0, chrome, W, H, Paint::Color{255, 255, 255, 255}));
+    Check("empty: status text shown below browser",
+          AnyNonBackground(c, 0, browser, W, H,
+                           Paint::Color{255, 255, 255, 255}));
   }
 
   // --- a real page with image + text + boxes -------------------------------
@@ -108,19 +108,20 @@ int main() {
   b.setUrlText("http://localhost/");
   Paint::Canvas c = b.render(W, H);
 
-  // Chrome + address bar text.
-  Check("chrome bar present", FindColor(c, 0, 0, W, 4, 0xdd, 0xdd, 0xdd));
+  // Browser + address bar text.
+  Check("browser bar present", FindColor(c, 0, 0, W, 4, 0xdd, 0xdd, 0xdd));
   Check("address-bar URL text rendered",
-        AnyNonBackground(c, 12, 6, W - 8, chrome - 6,
+        AnyNonBackground(c, 12, 6, W - 8, browser - 6,
                          Paint::Color{255, 255, 255, 255}));
 
-  // Page content (below chrome).
+  // Page content (below browser).
   Check("body background colour painted",
-        FindColor(c, 0, chrome, W, H, 0xff, 0xee, 0xdd));
-  Check("heading text rendered (dark pixels under chrome)",
-        FindDark(c, 8, chrome, 300, chrome + 120));
-  Check("green #box rendered", FindColor(c, 0, chrome, W, H, 0x00, 0xaa, 0x00));
-  Check("image (red) composited", FindColor(c, 0, chrome, W, H, 255, 0, 0));
+        FindColor(c, 0, browser, W, H, 0xff, 0xee, 0xdd));
+  Check("heading text rendered (dark pixels under browser)",
+        FindDark(c, 8, browser, 300, browser + 120));
+  Check("green #box rendered",
+        FindColor(c, 0, browser, W, H, 0x00, 0xaa, 0x00));
+  Check("image (red) composited", FindColor(c, 0, browser, W, H, 255, 0, 0));
 
   std::remove(logoPath.c_str());
 

@@ -5,54 +5,176 @@
  * by the renderer's per-tag pixel sizes. */
 
 /* ---------- Reset / base -------------------------------------------------- */
-html { display: block; }
-body { margin: 8px; color: #000000; background-color: #ffffff; }
+html {
+    display: block;
+}
+
+body {
+    margin: 8px;
+    color: #000000;
+    background-color: #ffffff;
+}
 
 /* ---------- Headings ------------------------------------------------------ */
-h1 { margin: 16px 0 8px; font-size: 2em; }
-h2 { margin: 14px 0 6px; font-size: 1.5em; }
-h3 { margin: 12px 0 6px; font-size: 1.17em; }
-h4 { margin: 10px 0 4px; font-size: 1em; font-weight: bold; }
-h5 { margin: 8px 0 4px; font-size: 0.83em; font-weight: bold; }
-h6 { margin: 8px 0 4px; font-size: 0.67em; font-weight: bold; }
+h1 {
+    margin: 16px 0 8px;
+    font-size: 2em;
+}
+
+h2 {
+    margin: 14px 0 6px;
+    font-size: 1.5em;
+}
+
+h3 {
+    margin: 12px 0 6px;
+    font-size: 1.17em;
+}
+
+h4 {
+    margin: 10px 0 4px;
+    font-size: 1em;
+    font-weight: bold;
+}
+
+h5 {
+    margin: 8px 0 4px;
+    font-size: 0.83em;
+    font-weight: bold;
+}
+
+h6 {
+    margin: 8px 0 4px;
+    font-size: 0.67em;
+    font-weight: bold;
+}
 
 /* ---------- Paragraphs / text blocks -------------------------------------- */
-p { margin: 8px 0; }
-blockquote { margin: 16px 40px; }
-pre { margin: 8px 0; white-space: pre; }
-hr { border: none; border-top: 1px solid #cccccc; margin: 8px 0; }
-code, kbd, samp, tt { font-family: monospace; }
+p {
+    margin: 8px 0;
+}
+
+blockquote {
+    margin: 16px 40px;
+}
+
+pre {
+    margin: 0;
+    white-space: pre;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #cccccc;
+    margin: 8px 0;
+}
+
+code,
+kbd,
+samp,
+tt {
+    font-family: monospace;
+}
 
 /* ---------- Links --------------------------------------------------------- */
-a { color: #0000ee; text-decoration: underline; }
-a:visited { color: #551a8b; }
-a:hover { text-decoration: underline; }
+a {
+    color: #0000ee;
+    text-decoration: underline;
+}
+
+a:visited {
+    color: #551a8b;
+}
+
+a:hover {
+    text-decoration: underline;
+}
 
 /* ---------- Lists --------------------------------------------------------- */
-ul { margin: 8px 0 8px 40px; padding: 0; list-style-type: disc; }
-ol { margin: 8px 0 8px 40px; padding: 0; list-style-type: decimal; }
-li { margin: 2px 0; }
-li ul { list-style-type: circle; margin-top: 0; margin-bottom: 0; }
-li ol { margin-top: 0; margin-bottom: 0; }
-dl { margin: 8px 0; }
-dt { font-weight: bold; margin: 4px 0; }
-dd { margin: 0 0 0 40px; }
+ul {
+    margin: 8px 0 8px 40px;
+    padding: 0;
+    list-style-type: disc;
+}
+
+ol {
+    margin: 8px 0 8px 40px;
+    padding: 0;
+    list-style-type: decimal;
+}
+
+li {
+    margin: 2px 0;
+}
+
+li ul {
+    list-style-type: circle;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+li ol {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+dl {
+    margin: 8px 0;
+}
+
+dt {
+    font-weight: bold;
+    margin: 4px 0;
+}
+
+dd {
+    margin: 0 0 0 40px;
+}
 
 /* ---------- Tables -------------------------------------------------------- */
-table { border-collapse: collapse; border-spacing: 0; margin: 8px 0; }
-caption { text-align: center; margin: 4px 0; }
-th, td {
-  padding: 2px 6px;
-  border: 1px solid #a2a2a2;
-  vertical-align: middle;
+table {
+    border-spacing: 0;
 }
-th { font-weight: bold; background-color: #d2d2d2; }
+
+caption {
+    text-align: center;
+    margin: 4px 0;
+}
+
+thead,
+tbody,
+tfoot {
+    display: contents;
+}
+
+tr {
+    display: flex;
+    margin: 0;
+    padding: 0;
+}
+
+th,
+td {
+    padding: 1px;
+    vertical-align: middle;
+    flex: 1 1 0;
+    min-width: 0;
+    margin: 0;
+}
+
+th {
+    font-weight: bold;
+}
 
 /* ---------- Forms --------------------------------------------------------- */
-input, textarea, select, button {
-  font-family: inherit;
-  font-size: inherit;
+input,
+textarea,
+select,
+button {
+    font-family: inherit;
+    font-size: inherit;
 }
+
 input[type="text"],
 input[type="password"],
 input[type="email"],
@@ -60,46 +182,85 @@ input[type="search"],
 input[type="number"],
 input[type="url"],
 textarea {
-  border: 1px solid #767676;
-  padding: 1px 4px;
-  background-color: #ffffff;
+    border: 1px solid #767676;
+    padding: 1px 4px;
+    background-color: #ffffff;
 }
+
 select {
-  border: 1px solid #767676;
-  padding: 1px 4px;
-  background-color: #ffffff;
+    border: 1px solid #767676;
+    padding: 1px 4px;
+    background-color: #ffffff;
 }
-button, input[type="submit"], input[type="button"], input[type="reset"] {
-  border: 1px solid #767676;
-  padding: 1px 8px;
-  background-color: #efefef;
-  cursor: default;
+
+button,
+input[type="submit"],
+input[type="button"],
+input[type="reset"] {
+    border: 1px solid #767676;
+    padding: 1px 8px;
+    background-color: #efefef;
+    cursor: default;
 }
+
 input[type="checkbox"],
 input[type="radio"] {
-  margin: 3px 3px 3px 0;
+    margin: 3px 3px 3px 0;
 }
+
 fieldset {
-  border: 1px solid #767676;
-  padding: 4px 8px;
-  margin: 8px 0;
+    border: 1px solid #767676;
+    padding: 4px 8px;
+    margin: 8px 0;
 }
+
 legend {
-  padding: 0 4px;
+    padding: 0 4px;
 }
 
 /* ---------- Images -------------------------------------------------------- */
-img { border: none; }
+img {
+    border: none;
+}
 
 /* ---------- SVG ----------------------------------------------------------- */
-svg { display: inline; }
+svg {
+    display: inline;
+}
 
 /* ---------- Misc ---------------------------------------------------------- */
-sub { vertical-align: sub; font-size: smaller; }
-sup { vertical-align: super; font-size: smaller; }
-small { font-size: smaller; }
-big { font-size: larger; }
-mark { background-color: #ff0; color: #000; }
-abbr, acronym { text-decoration: dotted underline; }
-ins { text-decoration: underline; }
-del { text-decoration: line-through; }
+sub {
+    vertical-align: sub;
+    font-size: smaller;
+}
+
+sup {
+    vertical-align: super;
+    font-size: smaller;
+}
+
+small {
+    font-size: smaller;
+}
+
+big {
+    font-size: larger;
+}
+
+mark {
+    background-color: #ff0;
+    color: #000;
+}
+
+abbr,
+acronym {
+    text-decoration: dotted underline;
+}
+
+ins {
+    text-decoration: underline;
+}
+
+del {
+    text-decoration: line-through;
+}

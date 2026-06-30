@@ -1,4 +1,5 @@
 #include "../include/Audio.hpp"
+#include "../include/Debugger.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +17,8 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #endif
+
+using namespace Debug;
 
 namespace DesktopWebview {
 namespace Audio {
@@ -81,13 +84,16 @@ int AudioOutput::channels() const { return m_impl->channels; }
 #if defined(__linux__) || defined(__gnu_linux__)
 
 bool AudioOutput::open(int sampleRate, int channels) {
+  DEBUG_LOGF("AudioOutput::open(sampleRate: %d, channels: %d)", LogLevel::INFO,
+             sampleRate, channels);
+
   if (m_impl->open) {
     close();
   }
   int err = snd_pcm_open(&m_impl->pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
   if (err < 0) {
-    std::cerr << "ALSA: cannot open default device: " << snd_strerror(err)
-              << std::endl;
+    DEBUG_LOGF("ALSA: cannot open default device: %s", LogLevel::CRASH,
+               snd_strerror(err));
     m_impl->pcm = nullptr;
     return false;
   }
@@ -96,7 +102,8 @@ bool AudioOutput::open(int sampleRate, int channels) {
                            SND_PCM_ACCESS_RW_INTERLEAVED, channels, sampleRate,
                            1, 100000);
   if (err < 0) {
-    std::cerr << "ALSA: cannot set params: " << snd_strerror(err) << std::endl;
+    DEBUG_LOGF("ALSA: cannot set params: %s", LogLevel::CRASH,
+               snd_strerror(err));
     snd_pcm_close(m_impl->pcm);
     m_impl->pcm = nullptr;
     return false;

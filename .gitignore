@@ -3,3 +3,7 @@ build/
 build-linux/
 build-windows/
 a.exe
+
+# run-desktopwebview skill driver runtime output
+.claude/skills/run-desktopwebview/app.log
+.claude/skills/run-desktopwebview/shot.png

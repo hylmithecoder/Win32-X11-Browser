@@ -27,6 +27,13 @@ public:
   // Render frame `index` into `out`. Returns false if the index is out of
   // range (past the end of a bounded source).
   virtual bool frameAt(int index, Image::Bitmap &out) = 0;
+
+  // Audio interface. Defaults are no-op for sources without audio.
+  virtual bool hasAudio() const { return false; }
+  virtual int audioSampleRate() const { return 0; }
+  virtual int audioChannels() const { return 0; }
+  virtual void startAudio() {}
+  virtual void stopAudio() {}
 };
 
 // Map a playback time (seconds) to a frame index for `src`. Clamps to the last
@@ -103,6 +110,12 @@ public:
   int frameCount() const override;
   bool frameAt(int index, Image::Bitmap &out) override;
 
+  bool hasAudio() const override;
+  int audioSampleRate() const override;
+  int audioChannels() const override;
+  void startAudio() override;
+  void stopAudio() override;
+
   bool valid() const;
 
 private:
@@ -113,7 +126,8 @@ private:
 // Pick the best available decoder for a path or URL:
 // - "*.rawv"            -> FileVideoSource (custom uncompressed format)
 // - anything else       -> FfmpegVideoSource when built with ffmpeg and the
-//                          file opens; otherwise a SyntheticVideoSource preview.
+//                          file opens; otherwise a SyntheticVideoSource
+//                          preview.
 // Never returns null.
 std::unique_ptr<VideoSource> openVideoFile(const std::string &pathOrUrl);
 
