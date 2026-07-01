@@ -1,7 +1,7 @@
-#include "../include/Css.hpp"
-#include "../include/Layout.hpp"
-#include "../include/Paint.hpp"
-#include "../include/Wrapper.hpp"
+#include "Css.hpp"
+#include "Layout.hpp"
+#include "Paint.hpp"
+#include "Wrapper.hpp"
 #include <cstdio>
 #include <fstream>
 #include <iostream>

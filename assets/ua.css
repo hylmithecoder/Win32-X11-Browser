@@ -15,6 +15,23 @@ body {
     background-color: #ffffff;
 }
 
+/* ---------- Document metadata (never rendered) ---------------------------- */
+head,
+title,
+meta,
+link,
+style,
+script,
+template,
+noscript,
+base {
+    display: none;
+}
+
+[hidden] {
+    display: none;
+}
+
 /* ---------- Headings ------------------------------------------------------ */
 h1 {
     margin: 16px 0 8px;
@@ -59,8 +76,9 @@ blockquote {
 }
 
 pre {
-    margin: 0;
+    margin: 8px 0;
     white-space: pre;
+    font-family: monospace;
 }
 
 hr {
@@ -74,6 +92,110 @@ kbd,
 samp,
 tt {
     font-family: monospace;
+}
+
+/* ---------- Text-level semantics ------------------------------------------ */
+strong,
+b {
+    font-weight: bold;
+}
+
+em,
+i,
+cite,
+var,
+dfn,
+address {
+    font-style: italic;
+}
+
+address {
+    /* address is also block-level per spec */
+    display: block;
+}
+
+u,
+ins {
+    text-decoration: underline;
+}
+
+s,
+strike,
+del {
+    text-decoration: line-through;
+}
+
+del {
+    text-decoration: line-through;
+}
+
+q::before {
+    content: open-quote;
+}
+
+q::after {
+    content: close-quote;
+}
+
+/* Legacy presentational tag, kept for compatibility with old pages. */
+center {
+    display: block;
+    text-align: center;
+}
+
+/* ---------- Semantic HTML5 sectioning elements ----------------------------
+ * Most engines fall back to CSS2's default "inline" for unknown elements,
+ * so these must be declared explicitly or the layout breaks. */
+article,
+aside,
+details,
+figcaption,
+figure,
+footer,
+header,
+main,
+nav,
+section,
+summary,
+dialog {
+    display: block;
+}
+
+figure {
+    margin: 16px 40px;
+}
+
+figcaption {
+    font-size: 0.9em;
+    color: #595959;
+}
+
+summary {
+    display: list-item;
+    cursor: default;
+}
+
+details {
+    margin: 8px 0;
+}
+
+details:not([open])>*:not(summary) {
+    display: none;
+}
+
+dialog {
+    position: absolute;
+    left: 0;
+    right: 0;
+    margin: auto;
+    border: 1px solid #767676;
+    padding: 8px;
+    background-color: #ffffff;
+    color: #000000;
+}
+
+dialog:not([open]) {
+    display: none;
 }
 
 /* ---------- Links --------------------------------------------------------- */
@@ -164,6 +286,7 @@ td {
 
 th {
     font-weight: bold;
+    text-align: center;
 }
 
 /* ---------- Forms --------------------------------------------------------- */
@@ -181,16 +304,56 @@ input[type="email"],
 input[type="search"],
 input[type="number"],
 input[type="url"],
+input[type="tel"],
+input[type="date"],
+input[type="time"],
+input[type="datetime-local"],
+input[type="month"],
+input[type="week"] {
+    border: 1px solid #767676;
+    padding: 1px 4px;
+    background-color: #ffffff;
+    height: 38px;
+}
+
+input[type="color"] {
+    border: 1px solid #767676;
+    padding: 2px;
+    background-color: #ffffff;
+    height: 38px;
+    width: 44px;
+}
+
+input[type="range"] {
+    height: 20px;
+}
+
+input[type="file"] {
+    border: none;
+}
+
 textarea {
     border: 1px solid #767676;
     padding: 1px 4px;
     background-color: #ffffff;
+    height: 80px;
+    resize: both;
 }
 
 select {
     border: 1px solid #767676;
     padding: 1px 4px;
     background-color: #ffffff;
+    height: 38px;
+}
+
+optgroup {
+    font-weight: bold;
+    font-style: normal;
+}
+
+option {
+    font-weight: normal;
 }
 
 button,
@@ -208,27 +371,124 @@ input[type="radio"] {
     margin: 3px 3px 3px 0;
 }
 
+label {
+    cursor: default;
+}
+
 fieldset {
+    display: block;
     border: 1px solid #767676;
     padding: 4px 8px;
     margin: 8px 0;
+    min-width: 0;
 }
 
 legend {
+    display: block;
     padding: 0 4px;
 }
 
-/* ---------- Images -------------------------------------------------------- */
+datalist {
+    display: none;
+}
+
+progress,
+meter {
+    display: inline-block;
+    height: 16px;
+    width: 160px;
+    vertical-align: middle;
+}
+
+output {
+    display: inline;
+}
+
+/* Disabled controls: dimmed, non-interactive cursor. */
+input:disabled,
+textarea:disabled,
+select:disabled,
+button:disabled,
+optgroup:disabled,
+option:disabled,
+fieldset:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* ---------- Focus / selection ---------------------------------------------
+ * Keyboard-visible focus ring; browsers vary the color but all draw one. */
+a:focus,
+input:focus,
+textarea:focus,
+select:focus,
+button:focus,
+[tabindex]:focus {
+    outline: 2px solid #4d90fe;
+    outline-offset: 1px;
+}
+
+::selection {
+    background-color: #b4d7ff;
+    color: #000000;
+}
+
+/* ---------- Images / media -------------------------------------------------
+ */
 img {
     border: none;
 }
 
-/* ---------- SVG ----------------------------------------------------------- */
+img,
+video,
+canvas,
+iframe,
+embed,
+object {
+    display: inline-block;
+}
+
+video,
+canvas {
+    background-color: #000000;
+}
+
+iframe {
+    border: 1px solid #767676;
+}
+
+audio {
+    display: inline-block;
+    height: 32px;
+}
+
+audio:not([controls]) {
+    display: none;
+}
+
+/* ---------- SVG ------------------------------------------------------------
+ */
 svg {
     display: inline;
 }
 
-/* ---------- Misc ---------------------------------------------------------- */
+/* ---------- Ruby annotations ----------------------------------------------
+ */
+ruby {
+    display: ruby;
+}
+
+rt {
+    display: ruby-text;
+    font-size: 0.5em;
+}
+
+rp {
+    display: none;
+}
+
+/* ---------- Misc ------------------------------------------------------------
+ */
 sub {
     vertical-align: sub;
     font-size: smaller;
@@ -257,10 +517,10 @@ acronym {
     text-decoration: dotted underline;
 }
 
-ins {
-    text-decoration: underline;
+wbr {
+    display: inline;
 }
 
-del {
-    text-decoration: line-through;
+br {
+    display: inline;
 }

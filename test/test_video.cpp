@@ -1,6 +1,6 @@
-#include "../include/Image.hpp"
-#include "../include/Paint.hpp"
-#include "../include/Video.hpp"
+#include "Image.hpp"
+#include "Paint.hpp"
+#include "Video.hpp"
 #include <iostream>
 #include <string>
 

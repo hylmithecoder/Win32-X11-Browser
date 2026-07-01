@@ -1,5 +1,5 @@
-#include "../include/Browser.hpp"
-#include "../include/Paint.hpp"
+#include "Browser.hpp"
+#include "Paint.hpp"
 #include <cstdio>
 #include <iostream>
 #include <string>

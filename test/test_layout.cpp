@@ -1,6 +1,6 @@
-#include "../include/Css.hpp"
-#include "../include/Layout.hpp"
-#include "../include/Wrapper.hpp"
+#include "Css.hpp"
+#include "Layout.hpp"
+#include "Wrapper.hpp"
 #include <cmath>
 #include <iostream>
 #include <string>

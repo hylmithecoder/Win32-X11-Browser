@@ -1,4 +1,4 @@
-#include "../include/JsEngine.hpp"
+#include "JsEngine.hpp"
 #include <cassert>
 #include <iostream>
 #include <string>

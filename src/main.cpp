@@ -1,8 +1,8 @@
-#include "../include/BaseWindow.hpp"
-#include "../include/Browser.hpp"
-#include "../include/Debugger.hpp"
-#include "../include/Net.hpp"
-#include "../include/Optimizer.hpp"
+#include "BaseWindow.hpp"
+#include "Browser.hpp"
+#include "Debugger.hpp"
+#include "Net.hpp"
+#include "Optimizer.hpp"
 
 #include <string>
 

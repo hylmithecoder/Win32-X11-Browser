@@ -1,5 +1,5 @@
-#include "../include/Font.hpp"
-#include "../include/Paint.hpp"
+#include "Font.hpp"
+#include "Paint.hpp"
 #include <iostream>
 #include <string>
 

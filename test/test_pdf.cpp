@@ -1,5 +1,5 @@
-#include "../include/Debugger.hpp"
-#include "../include/Documents.hpp"
+#include "Debugger.hpp"
+#include "Documents.hpp"
 
 #include <cstdio>
 #include <cstring>

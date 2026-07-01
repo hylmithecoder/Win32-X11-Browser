@@ -1,8 +1,8 @@
-#include "../include/BaseWindow.hpp"
-#include "../include/Css.hpp"
-#include "../include/Layout.hpp"
-#include "../include/Paint.hpp"
-#include "../include/Wrapper.hpp"
+#include "BaseWindow.hpp"
+#include "Css.hpp"
+#include "Layout.hpp"
+#include "Paint.hpp"
+#include "Wrapper.hpp"
 
 #include <string>
 

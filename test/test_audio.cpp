@@ -1,4 +1,4 @@
-#include "../include/Audio.hpp"
+#include "Audio.hpp"
 #include <cmath>
 #include <iostream>
 #include <string>

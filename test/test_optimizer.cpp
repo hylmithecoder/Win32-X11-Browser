@@ -1,4 +1,4 @@
-#include "../include/Optimizer.hpp"
+#include "Optimizer.hpp"
 
 #include <cassert>
 #include <cstdio>

@@ -1,5 +1,5 @@
-#include "../include/Image.hpp"
-#include "../include/Paint.hpp"
+#include "Image.hpp"
+#include "Paint.hpp"
 #include <cstdint>
 #include <iostream>
 #include <string>

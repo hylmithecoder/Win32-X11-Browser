@@ -1,5 +1,5 @@
-#include "../include/Image.hpp"
-#include "../include/Svg.hpp"
+#include "Image.hpp"
+#include "Svg.hpp"
 #include <iostream>
 #include <string>
 

@@ -1,5 +1,5 @@
-#include "../include/Net.hpp"
-#include "../include/Wrapper.hpp"
+#include "Net.hpp"
+#include "Wrapper.hpp"
 #include <iostream>
 
 using namespace DesktopWebview;

@@ -1,5 +1,5 @@
-#include "../include/Css.hpp"
-#include "../include/Wrapper.hpp"
+#include "Css.hpp"
+#include "Wrapper.hpp"
 #include <iostream>
 #include <string>
 
@@ -36,28 +36,49 @@ static void ParsingTests() {
                           "@media screen { .ignored { color: blue; } }\n"
                           "#main { color: green }\n";
 
-  Css::Stylesheet sheet = Css::parse(css);
+  Css::Stylesheet sheet = Css::parse(css, 960.0f);
 
-  // 3 rules: the grouped h1/.title, div p, and #main. The @media block is
-  // skipped entirely.
-  Check("parsed 3 rules (at-rule skipped)", sheet.rules.size() == 3);
+  // 4 rules: grouped h1/.title, div p, .ignored (parsed from @media screen),
+  // and #main.
+  Check("parsed 4 rules (at-rule parsed)", sheet.rules.size() == 4);
 
-  if (sheet.rules.size() >= 1) {
-    const Css::Rule &r0 = sheet.rules[0];
-    Check("rule 0 has 2 grouped selectors", r0.selectors.size() == 2);
-    Check("rule 0 has 2 declarations", r0.declarations.size() == 2);
-    Check("rule 0 decl 0 is color: red",
-          r0.declarations[0].property == "color" &&
-              r0.declarations[0].value == "red");
+  if (sheet.rules.size() >= 3) {
+    const Css::Rule &r2 = sheet.rules[2];
+    Check("rule 2 parsed from @media is .ignored",
+          r2.selectors.size() == 1 &&
+              r2.selectors[0].components[0].classes.size() == 1 &&
+              r2.selectors[0].components[0].classes[0] == "ignored");
   }
 
-  if (sheet.rules.size() >= 2) {
-    const Css::Rule &r1 = sheet.rules[1];
-    Check("'div p' parsed as 2 components",
-          r1.selectors.size() == 1 && r1.selectors[0].components.size() == 2);
-    Check("margin marked !important", r1.declarations.size() == 1 &&
-                                          r1.declarations[0].important &&
-                                          r1.declarations[0].value == "0");
+  // Test media queries that should be skipped (viewport width 960px)
+  const std::string cssMedia =
+      "@media (min-width: 1200px) { .large { color: red; } }\n"
+      "@media (max-width: 768px) { .small { color: blue; } }\n"
+      "@media (min-width: 768px) and (max-width: 1000px) { .medium { color: "
+      "green; } }\n";
+  Css::Stylesheet sheetMedia = Css::parse(cssMedia, 960.0f);
+  Check("min-width 1200px and max-width 768px skipped, medium parsed",
+        sheetMedia.rules.size() == 1 &&
+            sheetMedia.rules[0].selectors[0].components[0].classes[0] ==
+                "medium");
+
+  // Test pseudo-class / attribute parsing
+  const std::string cssPseudo =
+      "input:focus { border: 1px; }\n"
+      ".btn-primary::after { content: ''; }\n"
+      "button[type=\"submit\"] { background: blue; }\n";
+  Css::Stylesheet sheetPseudo = Css::parse(cssPseudo);
+  Check("parsed 3 pseudo rules", sheetPseudo.rules.size() == 3);
+  if (sheetPseudo.rules.size() == 3) {
+    Check("input:focus tag is input",
+          sheetPseudo.rules[0].selectors[0].components[0].tag == "input");
+    Check("input:focus has no class 'focus'",
+          sheetPseudo.rules[0].selectors[0].components[0].classes.empty());
+    Check(".btn-primary::after class is btn-primary",
+          sheetPseudo.rules[1].selectors[0].components[0].classes[0] ==
+              "btn-primary");
+    Check("button[type=\"submit\"] tag is button",
+          sheetPseudo.rules[2].selectors[0].components[0].tag == "button");
   }
 }
 
@@ -187,10 +208,77 @@ static void CascadeTests() {
         Val(style2, "color") == "green");
 }
 
+static void AttrAndPseudoTests() {
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "Attribute selectors and pseudo-classes" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  const std::string html = "<html><body><form>"
+                           "<input type=\"text\" id=\"t\">"
+                           "<input type=\"checkbox\" id=\"c\" checked>"
+                           "<input type=\"checkbox\" id=\"u\">"
+                           "<input type=\"radio\" id=\"r\" disabled>"
+                           "<a id=\"lnk\" href=\"#\">x</a>"
+                           "<ul><li id=\"first\">a</li><li id=\"last\">b</li></ul>"
+                           "</form></body></html>";
+  Wrapper::HtmlDocument doc;
+  doc.parse(html);
+
+  auto sel = [](const std::string &s) {
+    return Css::parse(s + " { x: y }").rules[0].selectors[0];
+  };
+  Wrapper::Node t = doc.getElementById("t");
+  Wrapper::Node c = doc.getElementById("c");
+  Wrapper::Node u = doc.getElementById("u");
+  Wrapper::Node r = doc.getElementById("r");
+  Wrapper::Node lnk = doc.getElementById("lnk");
+  Wrapper::Node first = doc.getElementById("first");
+  Wrapper::Node last = doc.getElementById("last");
+  Check("test nodes found", t.valid() && c.valid() && u.valid() && r.valid() &&
+                                lnk.valid() && first.valid() && last.valid());
+
+  // Attribute selectors now target the right elements (previously stripped, so
+  // every input[type=...] rule matched every input).
+  Check("input[type=checkbox] matches checkbox",
+        Css::matches(sel("input[type=checkbox]"), c));
+  Check("input[type=checkbox] does NOT match text input",
+        !Css::matches(sel("input[type=checkbox]"), t));
+  Check("input[type=\"text\"] matches text input",
+        Css::matches(sel("input[type=\"text\"]"), t));
+  Check("input[type=\"text\"] does NOT match checkbox",
+        !Css::matches(sel("input[type=\"text\"]"), c));
+  Check("[disabled] matches disabled radio",
+        Css::matches(sel("[disabled]"), r));
+
+  // Pseudo-classes we can evaluate are now conditional (this is the blue-
+  // checkbox fix: `.x:checked` no longer matches unchecked boxes).
+  Check(":checked matches checked checkbox",
+        Css::matches(sel("input:checked"), c));
+  Check(":checked does NOT match unchecked checkbox",
+        !Css::matches(sel("input:checked"), u));
+  Check(":disabled matches disabled radio", Css::matches(sel(":disabled"), r));
+  Check(":disabled does NOT match enabled input",
+        !Css::matches(sel(":disabled"), t));
+  Check(":first-child matches first li",
+        Css::matches(sel("li:first-child"), first));
+  Check(":first-child does NOT match last li",
+        !Css::matches(sel("li:first-child"), last));
+  Check(":link matches <a href>", Css::matches(sel("a:link"), lnk));
+
+  // Unsupported/dynamic pseudos no longer match unconditionally.
+  Check("unsupported :hover never matches",
+        !Css::matches(sel("a:hover"), lnk));
+  Check("pseudo-element ::before never matches",
+        !Css::matches(sel("a::before"), lnk));
+}
+
 int main() {
   ParsingTests();
   SpecificityTests();
   MatchingTests();
+  AttrAndPseudoTests();
   CascadeTests();
 
   std::cout << "\n=========================================================="

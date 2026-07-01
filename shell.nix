@@ -210,7 +210,7 @@ if cross then (
         ln -sf build-linux/compile_commands.json compile_commands.json
         echo "Building test executables..."
         cmake --build build-linux -j$(nproc) --target \
-          TestNet TestWrapper TestCss TestLayout TestPaint TestImage \
+          TestNet TestWrapper TestCss TestInput TestLayout TestPaint TestImage \
           TestSvg TestVideo TestFont TestBrowser TestPdf TestAudio \
           TestWindowPaint TestJs TestBase64 TestOptimizer
       }
@@ -241,6 +241,10 @@ if cross then (
         echo "Running Linux TestCss executable..."
         echo "=========================================================="
         ./build-linux/TestCss || status=$?
+        echo "=========================================================="
+        echo "Running Linux TestInput executable..."
+        echo "=========================================================="
+        ./build-linux/TestInput || status=$?
         echo "=========================================================="
         echo "Running Linux TestLayout executable..."
         echo "=========================================================="

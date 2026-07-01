@@ -1,5 +1,5 @@
-#include "../include/Debugger.hpp"
-#include "../include/Net.hpp"
+#include "Debugger.hpp"
+#include "Net.hpp"
 #include <iostream>
 
 using namespace DesktopWebview;
@@ -7,7 +7,7 @@ using namespace DesktopWebview;
 int main() {
   Net::Init();
 
-  std::string url = "https://ipinfo.io/";
+  std::string url = "https://rule34.xxx//css/mobile.css?46";
   std::cout << "=========================================================="
             << std::endl;
   std::cout << "Testing Custom HTTPS GET (via OpenSSL & Raw Sockets)"
