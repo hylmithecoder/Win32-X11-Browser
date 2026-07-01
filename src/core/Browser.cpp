@@ -70,9 +70,9 @@ int ResolveFontSizeForDomNode(const Wrapper::Node &domNode,
 
       if (unit == "%" || unit == "em") {
         Wrapper::Node parent = current.parent();
-        int parentSize =
-            parent.valid() ? ResolveFontSizeForDomNode(parent, sheet, 16)
-                          : defaultSize;
+        int parentSize = parent.valid()
+                             ? ResolveFontSizeForDomNode(parent, sheet, 16)
+                             : defaultSize;
         return static_cast<int>(unit == "%" ? (val / 100.0 * parentSize)
                                             : (val * parentSize));
       }
@@ -1189,7 +1189,8 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     std::string rel = ToLower(link.attribute("rel"));
     if (rel == "stylesheet") {
       std::string href = link.attribute("href");
-      DEBUG_LOG("[Browser] Loading stylesheet: %s", href.c_str());
+      DEBUG_LOG("[Browser] Loading stylesheet: %s (%zu bytes)", href.c_str(),
+                href.size());
       if (!href.empty()) {
         std::string absHref = resolveUrl(href);
         std::vector<std::uint8_t> data;
@@ -1301,12 +1302,12 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
       std::vector<std::uint8_t> data;
       if (fetchResource(abs, data)) {
         std::string js(data.begin(), data.end());
-        std::cout << "[JS] Loaded external script: " << abs << " (" << js.size()
-                  << " bytes)" << std::endl;
+        DEBUG_LOG("[JS] Loaded external script: %s (%zu bytes)", abs.c_str(),
+                  js.size());
         engine.execute(js);
       } else {
-        std::cout << "[JS] Failed to load external script: " << abs
-                  << std::endl;
+        DEBUG_LOGF("[JS] Failed to load external script: %s", LogLevel::CRASH,
+                   abs.c_str());
       }
     } else {
       engine.execute(script.text());

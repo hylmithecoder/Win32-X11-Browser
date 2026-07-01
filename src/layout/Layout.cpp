@@ -719,8 +719,6 @@ void LayoutInlineChildren(LayoutBox &box) {
   d.content.height = (curY + lineHeight) - d.content.y;
 }
 
-
-
 void LayoutInlineContainer(LayoutBox &box, const Dimensions &containing) {
   CalculateBlockWidth(box, containing);
   CalculateBlockPosition(box, containing);
@@ -1533,9 +1531,8 @@ StyledNode styleTree(const Wrapper::Node &domRoot,
   // Only elements participate in the cascade; a bare text node carries no
   // styles of its own (and Css::matches would reject it from every selector
   // anyway -- computing it would just waste a pass over every rule).
-  sn.styles =
-      domRoot.isElement() ? Css::computeStyle(sheet, domRoot)
-                          : std::map<std::string, std::string>{};
+  sn.styles = domRoot.isElement() ? Css::computeStyle(sheet, domRoot)
+                                  : std::map<std::string, std::string>{};
   // Walk every child node (elements *and* text), not just domRoot.children()
   // (which is element-only): a bare text node interleaved with elements, e.g.
   // "Click " in "Click <a>here</a>", must still become a box, or its text
