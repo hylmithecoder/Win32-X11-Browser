@@ -56,7 +56,8 @@ void FillRect(Paint::Canvas &c, int x, int y, int w, int h, Paint::Color col) {
 }
 
 // A 1px-wide rectangle outline.
-void StrokeRect(Paint::Canvas &c, int x, int y, int w, int h, Paint::Color col) {
+void StrokeRect(Paint::Canvas &c, int x, int y, int w, int h,
+                Paint::Color col) {
   if (w <= 0 || h <= 0) {
     return;
   }
@@ -99,7 +100,8 @@ void ThickLine(Paint::Canvas &c, int x0, int y0, int x1, int y1, int t,
   }
 }
 
-void FillCircle(Paint::Canvas &c, float cx, float cy, float r, Paint::Color col) {
+void FillCircle(Paint::Canvas &c, float cx, float cy, float r,
+                Paint::Color col) {
   int x0 = static_cast<int>(std::floor(cx - r));
   int x1 = static_cast<int>(std::ceil(cx + r));
   int y0 = static_cast<int>(std::floor(cy - r));
@@ -144,9 +146,12 @@ void DownTriangle(Paint::Canvas &c, int x, int y, int w, int h,
 // A checkmark tick drawn inside the box [x..x+w] x [y..y+h].
 void Checkmark(Paint::Canvas &c, int x, int y, int w, int h, Paint::Color col) {
   int t = std::max(1, w / 7);
-  int x1 = x + static_cast<int>(w * 0.22f), y1 = y + static_cast<int>(h * 0.52f);
-  int x2 = x + static_cast<int>(w * 0.42f), y2 = y + static_cast<int>(h * 0.72f);
-  int x3 = x + static_cast<int>(w * 0.78f), y3 = y + static_cast<int>(h * 0.28f);
+  int x1 = x + static_cast<int>(w * 0.22f),
+      y1 = y + static_cast<int>(h * 0.52f);
+  int x2 = x + static_cast<int>(w * 0.42f),
+      y2 = y + static_cast<int>(h * 0.72f);
+  int x3 = x + static_cast<int>(w * 0.78f),
+      y3 = y + static_cast<int>(h * 0.28f);
   ThickLine(c, x1, y1, x2, y2, t, col);
   ThickLine(c, x2, y2, x3, y3, t, col);
 }
@@ -179,7 +184,8 @@ ControlKind classify(const Wrapper::Node &node) {
     if (type == "password") {
       return ControlKind::Password;
     }
-    return ControlKind::Text; // text/search/email/url/number/... and the default
+    return ControlKind::Text; // text/search/email/url/number/... and the
+                              // default
   }
   if (name == "textarea") {
     return ControlKind::Textarea;
@@ -379,8 +385,8 @@ void paint(Paint::Canvas &canvas, const Wrapper::Node &node,
     StrokeRect(canvas, x, y, w, h, kBorder);
     std::string label = displayText(node).text;
     int ty = y + (h - lh) / 2;
-    Font::drawText(canvas, x + 6, ty, label,
-                   disabled ? kDisabledText : kBlack, fontSize);
+    Font::drawText(canvas, x + 6, ty, label, disabled ? kDisabledText : kBlack,
+                   fontSize);
     // Dropdown arrow on the right.
     int aw = 8, ah = 5;
     DownTriangle(canvas, x + w - aw - 6, y + (h - ah) / 2, aw, ah, kBorder);
@@ -402,7 +408,8 @@ void paint(Paint::Canvas &canvas, const Wrapper::Node &node,
     int ty = (k == ControlKind::Textarea) ? y + 4 : y + (h - lh) / 2;
     Font::drawText(canvas, x + 6, ty, dt.text, tcol, fontSize);
     if (focused && !disabled) {
-      int caretX = x + 6 + (dt.placeholder ? 0 : Font::textWidth(dt.text, fontSize));
+      int caretX =
+          x + 6 + (dt.placeholder ? 0 : Font::textWidth(dt.text, fontSize));
       FillRect(canvas, caretX + 1, ty, 1, lh, kBlack);
     }
     break;
