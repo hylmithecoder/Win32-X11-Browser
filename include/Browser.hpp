@@ -9,6 +9,7 @@
 
 #include "Video.hpp"
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -19,7 +20,8 @@ namespace Browser {
 
 // A key event delivered to the address bar / browser chrome.
 struct KeyInput {
-  enum Kind { Char, Backspace, Enter, Left, Right, Up, Down, Tab, Delete };
+  enum Kind { Char, Backspace, Enter, Left, Right, Up, Down, Tab, Delete,
+              Home, End };
   Kind kind = Char;
   char ch = 0;
   bool ctrl = false;
@@ -79,6 +81,11 @@ public:
   bool newTab(const std::string &url = "about:blank");
   bool closeTab(int index);
   bool switchTab(int index);
+
+  // Clipboard
+  void handlePaste(const std::string &text);
+  std::function<void()> m_requestPaste;
+  std::function<void(const std::string &)> m_copyText;
 
 private:
   Paint::Canvas renderPage(int width, int height);
@@ -163,6 +170,14 @@ private:
   int m_pageViewportH = 0;
 
   size_t m_cursorPos = 0;
+
+  // URL bar text selection
+  int m_urlSelAnchor = -1; // -1 = no selection
+  int m_urlSelFocus = -1;
+  bool m_urlSelecting = false; // true while dragging in URL bar
+
+  std::string urlBarSelectedText() const;
+  void urlBarDeleteSelection();
 
   // PDF state
   std::vector<std::pair<double, double>> m_pdfPageSizes;

@@ -53,6 +53,36 @@ void BaseWindow::SetSelectionText(const std::string &text) {
 #endif
 }
 
+void BaseWindow::SetPasteCallback(PasteCallback callback) {
+  m_paste = callback;
+}
+
+void BaseWindow::RequestPaste() {
+#if defined(_WIN32)
+  if (OpenClipboard(nullptr)) {
+    HANDLE h = GetClipboardData(CF_TEXT);
+    if (h) {
+      const char *p = static_cast<const char *>(GlobalLock(h));
+      if (p) {
+        m_pasteText = p;
+        GlobalUnlock(h);
+        if (m_paste) m_paste(m_pasteText);
+      }
+    }
+    CloseClipboard();
+  }
+#elif defined(__linux__) || defined(__gnu_linux__)
+  if (display && window && !m_pastePending) {
+    m_pastePending = true;
+    m_pasteText.clear();
+    // Request the CLIPBOARD selection contents
+    XConvertSelection(display, m_atomClipboard, m_atomUtf8, m_atomClipboard,
+                      window, CurrentTime);
+    XFlush(display);
+  }
+#endif
+}
+
 Paint::Canvas BaseWindow::RenderContent() {
   int w = m_width > 0 ? m_width : 1;
   int h = m_height > 0 ? m_height : 1;
@@ -909,6 +939,10 @@ void BaseWindow::Run() {
             e.kind = Key::Tab;
           } else if (ks == XK_Delete) {
             e.kind = Key::Delete;
+          } else if (ks == XK_Home) {
+            e.kind = Key::Home;
+          } else if (ks == XK_End) {
+            e.kind = Key::End;
           } else if (ks == XK_Left) {
             e.kind = Key::Left;
           } else if (ks == XK_Right) {
@@ -986,6 +1020,29 @@ void BaseWindow::Run() {
           e.y = event.xmotion.y;
           m_mouse(e);
         }
+        break;
+      }
+
+      case SelectionNotify: {
+        // Response to our XConvertSelection (paste request)
+        if (event.xselection.selection == m_atomClipboard &&
+            event.xselection.property != None) {
+          Atom actualType;
+          int actualFormat;
+          unsigned long itemCount, bytesAfter;
+          unsigned char *data = nullptr;
+          if (XGetWindowProperty(display, window, event.xselection.property, 0,
+                                 1024 * 1024, True, AnyPropertyType,
+                                 &actualType, &actualFormat, &itemCount,
+                                 &bytesAfter, &data) == Success &&
+              data && itemCount > 0) {
+            m_pasteText.assign(reinterpret_cast<char *>(data), itemCount);
+            if (m_paste) m_paste(m_pasteText);
+          }
+          if (data) XFree(data);
+          XDeleteProperty(display, window, event.xselection.property);
+        }
+        m_pastePending = false;
         break;
       }
 

@@ -1662,13 +1662,29 @@ void Browser::drawBrowser(Paint::Canvas &canvas, int width) {
   int px = 14;
   int ty = iy + (ih - Font::lineHeight(px)) / 2;
 
-  std::string displayUrl = m_urlText;
-  if (m_cursorPos <= displayUrl.size()) {
-    displayUrl.insert(m_cursorPos, "|");
+  // Draw selection highlight in URL bar
+  if (m_urlSelAnchor >= 0 && m_urlSelFocus >= 0 && m_urlSelAnchor != m_urlSelFocus) {
+    int a = std::min(m_urlSelAnchor, m_urlSelFocus);
+    int b = std::max(m_urlSelAnchor, m_urlSelFocus);
+    if (a < 0) a = 0;
+    if (b > static_cast<int>(m_urlText.size())) b = static_cast<int>(m_urlText.size());
+    int selX1 = ix + 4 + Font::textWidth(m_urlText.substr(0, a), px);
+    int selX2 = ix + 4 + Font::textWidth(m_urlText.substr(0, b), px);
+    Paint::Color selBg{0x33, 0x99, 0xff, 255};
+    FillRect(canvas, selX1, ty - 2, selX2 - selX1, Font::lineHeight(px) + 4, selBg);
+    // Draw selected text in white, rest in black
+    Font::drawText(canvas, ix + 4, ty, m_urlText.substr(0, a), kBlack, px);
+    Font::drawText(canvas, selX1, ty, m_urlText.substr(a, b - a), kWhite, px);
+    Font::drawText(canvas, selX2, ty, m_urlText.substr(b), kBlack, px);
   } else {
-    displayUrl.push_back('|');
+    std::string displayUrl = m_urlText;
+    if (m_cursorPos <= displayUrl.size()) {
+      displayUrl.insert(m_cursorPos, "|");
+    } else {
+      displayUrl.push_back('|');
+    }
+    Font::drawText(canvas, ix + 4, ty, displayUrl, kBlack, px);
   }
-  Font::drawText(canvas, ix + 4, ty, displayUrl, kBlack, px);
 
   // Separator under the address bar.
   FillRect(canvas, 0, barY + kBrowserHeight - 1, width, 1, border);
@@ -1883,7 +1899,31 @@ bool Browser::handleClick(int x, int y) {
       reload();
       return true;
     }
-    return false; // clicked in URL bar area, not a button
+
+    // Click in URL bar text area — position cursor
+    int urlStartX = bx + btnW + 6; // text starts after reload button + gap
+    int urlEndX = m_lastWidth - 8;
+    if (x >= urlStartX && x <= urlEndX) {
+      int clickInText = x - urlStartX - 4; // 4px text padding
+      int px = 14; // font size matches drawBrowser
+      // Find closest character boundary
+      size_t bestPos = 0;
+      int bestDist = std::abs(clickInText);
+      for (size_t i = 1; i <= m_urlText.size(); ++i) {
+        int tw = Font::textWidth(m_urlText.substr(0, i), px);
+        int dist = std::abs(clickInText - tw);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPos = i;
+        }
+      }
+      m_cursorPos = bestPos;
+      m_urlSelAnchor = static_cast<int>(bestPos);
+      m_urlSelFocus = static_cast<int>(bestPos);
+      m_urlSelecting = true;
+      return true;
+    }
+    return false;
   }
 
   if (!m_hasDoc) {
@@ -2092,6 +2132,29 @@ bool Browser::handleMouseDown(int x, int y) {
 }
 
 bool Browser::handleMouseMove(int x, int y) {
+  // Handle URL bar drag selection
+  if (m_urlSelecting) {
+    int chromeHeight = kBrowserHeight + kTabBarHeight;
+    int btnW = 26;
+    int urlStartX = 8 + btnW + 2 + btnW + 2 + btnW + 6;
+    int urlEndX = m_lastWidth - 8;
+    int clampedX = x;
+    if (clampedX < urlStartX) clampedX = urlStartX;
+    if (clampedX > urlEndX) clampedX = urlEndX;
+    int clickInText = clampedX - urlStartX - 4;
+    int px = 14;
+    size_t bestPos = 0;
+    int bestDist = std::abs(clickInText);
+    for (size_t i = 1; i <= m_urlText.size(); ++i) {
+      int tw = Font::textWidth(m_urlText.substr(0, i), px);
+      int dist = std::abs(clickInText - tw);
+      if (dist < bestDist) { bestDist = dist; bestPos = i; }
+    }
+    m_urlSelFocus = static_cast<int>(bestPos);
+    m_cursorPos = bestPos;
+    return true;
+  }
+
   // Handle scrollbar drag
   if (m_scrollbarDragging && m_hasDoc) {
     int maxScrollY = std::max(0, m_pageCanvasH - m_pageViewportH);
@@ -2125,6 +2188,15 @@ bool Browser::handleMouseMove(int x, int y) {
 }
 
 bool Browser::handleMouseUp(int x, int y) {
+  if (m_urlSelecting) {
+    m_urlSelecting = false;
+    // No drag: clear selection
+    if (m_urlSelAnchor == m_urlSelFocus) {
+      m_urlSelAnchor = -1;
+      m_urlSelFocus = -1;
+    }
+    return true;
+  }
   if (m_scrollbarDragging) {
     m_scrollbarDragging = false;
     return true;
@@ -2209,6 +2281,24 @@ bool Browser::handleKey(const KeyInput &key) {
   // --- Global shortcuts (Ctrl+key) ---
   if (key.ctrl) {
     if (key.kind == KeyInput::Char) {
+      if (key.ch == 'c' || key.ch == 'C') {
+        std::string sel = urlBarSelectedText();
+        if (!sel.empty() && m_copyText) {
+          m_copyText(sel);
+        }
+        return true;
+      }
+      if (key.ch == 'v' || key.ch == 'V') {
+        // Paste from clipboard (async via X11)
+        if (m_requestPaste) m_requestPaste();
+        return true;
+      }
+      if (key.ch == 'a' || key.ch == 'A') {
+        m_urlSelAnchor = 0;
+        m_urlSelFocus = static_cast<int>(m_urlText.size());
+        m_cursorPos = m_urlText.size();
+        return true;
+      }
       if (key.ch == 't' || key.ch == 'T') {
         newTab("https://www.google.com/");
         return true;
@@ -2218,102 +2308,118 @@ bool Browser::handleKey(const KeyInput &key) {
         return true;
       }
       if (key.ch == 'l' || key.ch == 'L') {
-        // Focus URL bar (clear and select all)
-        m_urlText.clear();
-        m_cursorPos = 0;
+        m_urlSelAnchor = 0;
+        m_urlSelFocus = static_cast<int>(m_urlText.size());
+        m_cursorPos = m_urlText.size();
         return true;
       }
     }
     if (key.kind == KeyInput::Tab) {
-      // Ctrl+Tab: next tab, Ctrl+Shift+Tab: prev tab
       if (key.shift) {
         int prev = m_activeTab - 1;
-        if (prev < 0)
-          prev = static_cast<int>(m_tabs.size()) - 1;
+        if (prev < 0) prev = static_cast<int>(m_tabs.size()) - 1;
         switchTab(prev);
       } else {
         int next = m_activeTab + 1;
-        if (next >= static_cast<int>(m_tabs.size()))
-          next = 0;
+        if (next >= static_cast<int>(m_tabs.size())) next = 0;
         switchTab(next);
       }
       return true;
     }
-    if (key.kind == KeyInput::Left) {
-      goBack();
-      return true;
-    }
-    if (key.kind == KeyInput::Right) {
-      goForward();
-      return true;
-    }
+    if (key.kind == KeyInput::Left) { goBack(); return true; }
+    if (key.kind == KeyInput::Right) { goForward(); return true; }
     return false;
   }
 
   // --- Alt shortcuts ---
   if (key.alt) {
-    if (key.kind == KeyInput::Left) {
-      goBack();
-      return true;
-    }
-    if (key.kind == KeyInput::Right) {
-      goForward();
-      return true;
-    }
+    if (key.kind == KeyInput::Left) { goBack(); return true; }
+    if (key.kind == KeyInput::Right) { goForward(); return true; }
     return false;
   }
 
-  // --- Regular keys ---
-  switch (key.kind) {
-  case KeyInput::Char:
-    if (m_cursorPos <= m_urlText.size()) {
-      m_urlText.insert(m_cursorPos, 1, key.ch);
-      m_cursorPos++;
-    } else {
-      m_urlText.push_back(key.ch);
-      m_cursorPos = m_urlText.size();
-    }
+  // --- Shift + Arrow: extend selection ---
+  if (key.shift && (key.kind == KeyInput::Left || key.kind == KeyInput::Right)) {
+    if (m_urlSelAnchor < 0) m_urlSelAnchor = static_cast<int>(m_cursorPos);
+    if (key.kind == KeyInput::Left && m_cursorPos > 0) m_cursorPos--;
+    if (key.kind == KeyInput::Right && m_cursorPos < m_urlText.size()) m_cursorPos++;
+    m_urlSelFocus = static_cast<int>(m_cursorPos);
     return true;
+  }
+  if (key.shift && (key.kind == KeyInput::Home || key.kind == KeyInput::End)) {
+    if (m_urlSelAnchor < 0) m_urlSelAnchor = static_cast<int>(m_cursorPos);
+    if (key.kind == KeyInput::Home) m_cursorPos = 0;
+    if (key.kind == KeyInput::End) m_cursorPos = m_urlText.size();
+    m_urlSelFocus = static_cast<int>(m_cursorPos);
+    return true;
+  }
 
-  case KeyInput::Backspace:
+  bool hasSelection = (m_urlSelAnchor >= 0 && m_urlSelFocus >= 0 &&
+                       m_urlSelAnchor != m_urlSelFocus);
+
+  if (key.kind == KeyInput::Char) {
+    if (hasSelection) urlBarDeleteSelection();
+    m_urlText.insert(m_cursorPos, 1, key.ch);
+    m_cursorPos++;
+    m_urlSelAnchor = -1;
+    m_urlSelFocus = -1;
+    return true;
+  }
+
+  if (key.kind == KeyInput::Backspace) {
+    if (hasSelection) { urlBarDeleteSelection(); return true; }
     if (m_cursorPos > 0 && !m_urlText.empty()) {
       m_urlText.erase(m_cursorPos - 1, 1);
       m_cursorPos--;
       return true;
     }
     return false;
+  }
 
-  case KeyInput::Left:
-    if (m_cursorPos > 0) {
-      m_cursorPos--;
-      return true;
-    }
-    return false;
-
-  case KeyInput::Right:
+  if (key.kind == KeyInput::Delete) {
+    if (hasSelection) { urlBarDeleteSelection(); return true; }
     if (m_cursorPos < m_urlText.size()) {
-      m_cursorPos++;
+      m_urlText.erase(m_cursorPos, 1);
       return true;
     }
     return false;
+  }
 
-  case KeyInput::Enter:
+  if (key.kind == KeyInput::Left) {
+    m_urlSelAnchor = -1; m_urlSelFocus = -1;
+    if (m_cursorPos > 0) { m_cursorPos--; return true; }
+    return false;
+  }
+  if (key.kind == KeyInput::Right) {
+    m_urlSelAnchor = -1; m_urlSelFocus = -1;
+    if (m_cursorPos < m_urlText.size()) { m_cursorPos++; return true; }
+    return false;
+  }
+  if (key.kind == KeyInput::Home) {
+    m_urlSelAnchor = -1; m_urlSelFocus = -1; m_cursorPos = 0; return true;
+  }
+  if (key.kind == KeyInput::End) {
+    m_urlSelAnchor = -1; m_urlSelFocus = -1;
+    m_cursorPos = m_urlText.size(); return true;
+  }
+
+  if (key.kind == KeyInput::Enter) {
+    m_urlSelAnchor = -1; m_urlSelFocus = -1;
     navigate(m_urlText);
     return true;
+  }
 
-  case KeyInput::Up:
+  if (key.kind == KeyInput::Up) {
     m_scrollY = std::max(0.0f, m_scrollY - 30.0f);
     updatePdfCurrentPageOnScroll();
     return true;
-
-  case KeyInput::Down:
+  }
+  if (key.kind == KeyInput::Down) {
     m_scrollY += 30.0f;
     updatePdfCurrentPageOnScroll();
     return true;
-
-  default:
-    break;
   }
+
   return false;
 }
 
@@ -2431,6 +2537,41 @@ bool Browser::switchTab(int index) {
   m_activeTab = index;
   restoreTabState(index);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// URL bar selection + clipboard
+// ---------------------------------------------------------------------------
+
+std::string Browser::urlBarSelectedText() const {
+  if (m_urlSelAnchor < 0 || m_urlSelFocus < 0) return "";
+  int a = std::min(m_urlSelAnchor, m_urlSelFocus);
+  int b = std::max(m_urlSelAnchor, m_urlSelFocus);
+  if (a == b) return "";
+  if (a < 0) a = 0;
+  if (b > static_cast<int>(m_urlText.size())) b = static_cast<int>(m_urlText.size());
+  return m_urlText.substr(a, b - a);
+}
+
+void Browser::urlBarDeleteSelection() {
+  if (m_urlSelAnchor < 0 || m_urlSelFocus < 0) return;
+  int a = std::min(m_urlSelAnchor, m_urlSelFocus);
+  int b = std::max(m_urlSelAnchor, m_urlSelFocus);
+  if (a == b) return;
+  if (a < 0) a = 0;
+  if (b > static_cast<int>(m_urlText.size())) b = static_cast<int>(m_urlText.size());
+  m_urlText.erase(a, b - a);
+  m_cursorPos = a;
+  m_urlSelAnchor = -1;
+  m_urlSelFocus = -1;
+}
+
+void Browser::handlePaste(const std::string &text) {
+  // Replace selection or insert at cursor
+  urlBarDeleteSelection();
+  if (m_cursorPos > m_urlText.size()) m_cursorPos = m_urlText.size();
+  m_urlText.insert(m_cursorPos, text);
+  m_cursorPos += text.size();
 }
 
 } // namespace Browser

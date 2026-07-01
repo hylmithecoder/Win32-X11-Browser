@@ -23,9 +23,19 @@ int main(int argc, char **argv) {
   std::string startUrl = (argc > 1) ? argv[1] : "http://localhost/";
 
   Browser::Browser browser;
-  browser.navigate(startUrl);
 
   BaseWindow window;
+
+  // Wire up paste request (async clipboard read via X11)
+  browser.m_requestPaste = [&window]() {
+    window.RequestPaste();
+  };
+  browser.m_copyText = [&window](const std::string &text) {
+    window.SetSelectionText(text);
+  };
+
+  browser.navigate(startUrl);
+
   window.SetRenderCallback([&browser](int width, int height) {
     return browser.render(width, height);
   });
@@ -64,8 +74,19 @@ int main(int argc, char **argv) {
     case BaseWindow::Key::Delete:
       in.kind = Browser::KeyInput::Delete;
       break;
+    case BaseWindow::Key::Home:
+      in.kind = Browser::KeyInput::Home;
+      break;
+    case BaseWindow::Key::End:
+      in.kind = Browser::KeyInput::End;
+      break;
     }
+    // Ctrl+C / Ctrl+V are handled as Char events with ctrl flag
     return browser.handleKey(in);
+  });
+
+  window.SetPasteCallback([&browser](const std::string &text) {
+    browser.handlePaste(text);
   });
 
   window.SetMouseCallback([&browser, &window](const BaseWindow::MouseEvent &m) {

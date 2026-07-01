@@ -36,7 +36,8 @@ public:
 
   // A keyboard event delivered to the application (e.g. the address bar).
   struct Key {
-    enum Kind { Char, Backspace, Enter, Left, Right, Up, Down, Tab, Delete };
+    enum Kind { Char, Backspace, Enter, Left, Right, Up, Down, Tab, Delete,
+                Home, End };
     Kind kind = Char;
     char ch = 0;
     bool ctrl = false;
@@ -58,9 +59,12 @@ public:
   using MouseCallback = std::function<bool(const MouseEvent &)>;
   void SetMouseCallback(MouseCallback callback);
 
-  // Offer `text` as the contents of the system clipboard (X11 PRIMARY and
-  // CLIPBOARD selections; the Windows clipboard). Called when a text selection
-  // completes so the user can paste it elsewhere.
+  // Paste callback: invoked when clipboard text is available (async via X11).
+  using PasteCallback = std::function<void(const std::string &)>;
+  void SetPasteCallback(PasteCallback callback);
+  void RequestPaste(); // request clipboard contents (calls PasteCallback async)
+
+  // Offer `text` as the contents of the system clipboard.
   void SetSelectionText(const std::string &text);
 
   // Open the window and run the event loop until the user closes it or presses
@@ -71,6 +75,7 @@ private:
   RenderCallback m_render;
   KeyCallback m_key;
   MouseCallback m_mouse;
+  PasteCallback m_paste;
   int m_width = 1024;
   int m_height = 720;
 
@@ -129,6 +134,8 @@ private:
   // Clipboard: we take ownership of the PRIMARY and CLIPBOARD selections and
   // serve `m_selectionText` in response to SelectionRequest events.
   std::string m_selectionText;
+  std::string m_pasteText; // received paste text
+  bool m_pastePending = false;
   Atom m_atomPrimary = 0;
   Atom m_atomClipboard = 0;
   Atom m_atomTargets = 0;
