@@ -417,6 +417,58 @@ std::vector<std::uint8_t> EncodeBmp(const Image::Bitmap &bmp) {
 Browser::Browser() : m_status("No page loaded") {
   // Try to initialise OpenCL for GPU-accelerated base64. Non-fatal if no GPU.
   Base64::initOpenCL();
+  ensureDefaultTab();
+}
+
+void Browser::ensureDefaultTab() {
+  if (m_tabs.empty()) {
+    Tab blank;
+    blank.url = "about:blank";
+    blank.title = "New Tab";
+    m_tabs.push_back(blank);
+    m_tabHistory.push_back({HistoryEntry{"about:blank", ""}});
+    m_tabHistoryIndex.push_back(0);
+    m_activeTab = 0;
+  }
+}
+
+void Browser::saveTabState(int index) {
+  if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+    return;
+  Tab &t = m_tabs[index];
+  t.url = m_currentUrl;
+  t.title = m_title;
+  t.scrollY = m_scrollY;
+  t.pdfPageSizes = m_pdfPageSizes;
+  t.pdfZoom = m_pdfZoom;
+  t.pdfSidebarOpen = m_pdfSidebarOpen;
+  t.pdfCurrentPage = m_pdfCurrentPage;
+  t.htmlContent = m_currentHtml;
+}
+
+void Browser::restoreTabState(int index) {
+  if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+    return;
+  const Tab &t = m_tabs[index];
+  m_currentUrl = t.url;
+  m_title = t.title;
+  m_scrollY = t.scrollY;
+  m_pdfPageSizes = t.pdfPageSizes;
+  m_pdfZoom = t.pdfZoom;
+  m_pdfSidebarOpen = t.pdfSidebarOpen;
+  m_pdfCurrentPage = t.pdfCurrentPage;
+  m_currentHtml = t.htmlContent;
+  m_urlText = t.url;
+  if (m_urlText.rfind("http://", 0) == 0) {
+    m_urlText = m_urlText.substr(7);
+  }
+  m_cursorPos = m_urlText.size();
+  if (!m_currentHtml.empty()) {
+    loadHtml(m_currentHtml, m_currentUrl);
+  } else {
+    m_hasDoc = false;
+    m_status = "No page loaded";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +586,8 @@ void Browser::updatePdfCurrentPageOnScroll() {
   if (m_pdfPageSizes.empty()) {
     return;
   }
-  float viewportCenter = m_scrollY + (m_lastHeight - kBrowserHeight) / 2.0f;
+  float viewportCenter =
+      m_scrollY + (m_lastHeight - kBrowserHeight - kTabBarHeight) / 2.0f;
   int bestPage = 0;
   float y = 50.0f; // toolbar + spacing
   for (size_t i = 0; i < m_pdfPageSizes.size(); ++i) {
@@ -584,30 +637,37 @@ std::string Browser::generatePdfHtml(const std::string &target) {
   // Build sidebar thumbnails HTML
   std::string sidebarHtml;
   for (int i = 0; i < totalPages; ++i) {
-    int tw = 120;
+    int tw = 130;
     int th = static_cast<int>(
-        std::round(120.0 * m_pdfPageSizes[i].second / m_pdfPageSizes[i].first));
+        std::round(130.0 * m_pdfPageSizes[i].second / m_pdfPageSizes[i].first));
 
     bool isActive = (i == m_pdfCurrentPage);
-    std::string divStyle =
-        "margin-bottom:12px; text-align:center; padding:6px 0;";
-    std::string imgStyle = "box-shadow:0 2px 6px rgba(0,0,0,0.5);";
-    std::string numStyle = "font-size:11px; margin-top:4px;";
+
+    std::string thumbContainerStyle =
+        "display:block; margin:0 8px 14px 8px; text-align:center; "
+        "padding:8px 4px; border-radius:6px; cursor:pointer;";
+
+    std::string imgStyle =
+        "display:block; margin:0 auto; box-shadow:0 2px 8px rgba(0,0,0,0.5);";
+
+    std::string numStyle = "font-size:11px; margin-top:6px; text-align:center;";
 
     if (isActive) {
-      divStyle += " background:#1a2a3a; border-radius:4px;";
-      imgStyle += " border:2px solid #4d90fe;";
+      thumbContainerStyle += " background:#1a2a3a; border:2px solid #4d90fe;";
+      imgStyle += " border:1px solid #3a7ad4;";
       numStyle += " color:#4d90fe; font-weight:bold;";
     } else {
-      imgStyle += " border:2px solid #555;";
-      numStyle += " color:#888;";
+      thumbContainerStyle +=
+          " background:transparent; border:2px solid transparent;";
+      imgStyle += " border:1px solid #444;";
+      numStyle += " color:#999;";
     }
 
-    sidebarHtml += "<div style=\"" + divStyle +
+    sidebarHtml += "<div style=\"" + thumbContainerStyle +
                    "\">"
                    "<a href=\"action://scroll-to-page/" +
                    std::to_string(i) +
-                   "\">"
+                   "\" style=\"display:block; text-decoration:none;\">"
                    "<img src=\"pdf://page/" +
                    std::to_string(i) + "\" width=\"" + std::to_string(tw) +
                    "\" height=\"" + std::to_string(th) + "\" style=\"" +
@@ -626,31 +686,33 @@ std::string Browser::generatePdfHtml(const std::string &target) {
     int w = static_cast<int>(std::round(m_pdfPageSizes[i].first * m_pdfZoom));
     int h = static_cast<int>(std::round(m_pdfPageSizes[i].second * m_pdfZoom));
     pagesHtml +=
-        "<div style=\"margin-bottom:24px; text-align:center;\">"
+        "<div style=\"margin-bottom:20px; text-align:center; padding:8px 0;\">"
         "<img src=\"pdf://page/" +
         std::to_string(i) + "\" width=\"" + std::to_string(w) + "\" height=\"" +
         std::to_string(h) +
-        "\" style=\"box-shadow:0 4px 12px rgba(0,0,0,0.6); border:1px solid "
+        "\" style=\"box-shadow:0 4px 16px rgba(0,0,0,0.6); border:1px solid "
         "#1a1a1a;\">"
-        "<div style=\"color:#888; font-size:11px; margin-top:6px;\">Page " +
-        std::to_string(i + 1) +
+        "<div style=\"color:#888; font-size:11px; margin-top:8px;\">Page " +
+        std::to_string(i + 1) + " of " + std::to_string(totalPages) +
         "</div>"
         "</div>";
   }
 
   std::string zoomPct = std::to_string(static_cast<int>(m_pdfZoom * 100)) + "%";
 
-  // Build full page layout with tables
-  std::string tableContent;
+  // Build layout content (sidebar + main area)
+  std::string bodyContent;
   if (m_pdfSidebarOpen) {
-    tableContent +=
-        "<td style=\"width:160px; background:#252526; vertical-align:top; "
-        "border-right:1px solid #1a1a1a; padding:10px 0;\">" +
+    bodyContent +=
+        "<td style=\"width:180px; background:#252526; vertical-align:top; "
+        "border-right:1px solid #1a1a1a; padding:12px 0; overflow-y:auto; "
+        "max-height:calc(100vh - 60px);\">" +
         sidebarHtml + "</td>";
   }
-  tableContent += "<td style=\"background:#3a3a3a; vertical-align:top; "
-                  "padding:20px 0; text-align:center;\">" +
-                  pagesHtml + "</td>";
+  bodyContent += "<td style=\"background:#3a3a3a; vertical-align:top; "
+                 "padding:16px 24px; text-align:center; overflow-y:auto; "
+                 "max-height:calc(100vh - 60px);\">" +
+                 pagesHtml + "</td>";
 
   std::string page =
       "<html><head><title>" + displayName +
@@ -664,44 +726,68 @@ std::string Browser::generatePdfHtml(const std::string &target) {
       "</style>"
       "</head><body>"
 
-      // Toolbar
+      // Toolbar — each <a> gets its own narrow <td> so it doesn't fill a wide
+      // cell
       "<div style=\"background:#2d2d2d; border-bottom:1px solid #1a1a1a; "
       "padding:8px 16px; color:#d4d4d4;\">"
       "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" "
       "style=\"width:100%;\">"
       "<tr>"
-      "<td style=\"vertical-align:middle; text-align:left;\">"
+      // Left group: Sidebar button + filename
+      "<td style=\"vertical-align:middle; width:60px; padding-right:10px;\">"
       "<a href=\"action://toggle-sidebar\" style=\"background:#4a4a4a; "
       "padding:4px 8px; border-radius:4px; color:#fff; border:1px solid #555; "
-      "margin-right:12px;\">☰ Sidebar</a>"
+      "display:block; text-align:center;\">Sidebar</a>"
+      "</td>"
+      "<td style=\"vertical-align:middle; overflow:hidden;\">"
       "<span style=\"font-weight:bold; font-size:14px; color:#fff;\">" +
       displayName +
       "</span>"
       "</td>"
-      "<td style=\"vertical-align:middle; text-align:center;\">"
+      // Spacer
+      "<td style=\"width:20px;\"></td>"
+      // Center group: Prev + page info + Next
+      "<td style=\"vertical-align:middle; width:50px; padding-right:6px;\">"
       "<a href=\"action://prev-page\" style=\"background:#4a4a4a; padding:4px "
       "8px; border-radius:4px; color:#fff; border:1px solid #555; "
-      "margin-right:8px;\">◀ Prev</a>"
+      "display:block; text-align:center;\">Prev</a>"
+      "</td>"
+      "<td style=\"vertical-align:middle; text-align:center; "
+      "white-space:nowrap;\">"
       "<span style=\"font-weight:bold;\">Page " +
       std::to_string(m_pdfCurrentPage + 1) + " / " +
       std::to_string(totalPages) +
       "</span>"
+      "</td>"
+      "<td style=\"vertical-align:middle; width:50px; padding-left:6px;\">"
       "<a href=\"action://next-page\" style=\"background:#4a4a4a; padding:4px "
       "8px; border-radius:4px; color:#fff; border:1px solid #555; "
-      "margin-left:8px;\">Next ▶</a>"
+      "display:block; text-align:center;\">Next</a>"
       "</td>"
-      "<td style=\"vertical-align:middle; text-align:right;\">"
+      // Spacer
+      "<td style=\"width:20px;\"></td>"
+      // Right group: Zoom controls
+      "<td style=\"vertical-align:middle; width:50px; padding-right:6px;\">"
       "<a href=\"action://zoom-out\" style=\"background:#4a4a4a; padding:4px "
       "8px; border-radius:4px; color:#fff; border:1px solid #555; "
-      "margin-right:8px;\">➖</a>"
-      "<span style=\"font-weight:bold; margin-right:8px;\">" +
+      "display:block; text-align:center;\">Zoom-</a>"
+      "</td>"
+      "<td style=\"vertical-align:middle; text-align:center; "
+      "white-space:nowrap; "
+      "padding-right:6px;\">"
+      "<span style=\"font-weight:bold;\">" +
       zoomPct +
       "</span>"
+      "</td>"
+      "<td style=\"vertical-align:middle; width:50px; padding-right:6px;\">"
       "<a href=\"action://zoom-in\" style=\"background:#4a4a4a; padding:4px "
       "8px; border-radius:4px; color:#fff; border:1px solid #555; "
-      "margin-right:8px;\">➕</a>"
+      "display:block; text-align:center;\">Zoom+</a>"
+      "</td>"
+      "<td style=\"vertical-align:middle; width:50px;\">"
       "<a href=\"action://zoom-reset\" style=\"background:#4a4a4a; padding:4px "
-      "8px; border-radius:4px; color:#fff; border:1px solid #555;\">Reset</a>"
+      "8px; border-radius:4px; color:#fff; border:1px solid #555; "
+      "display:block; text-align:center;\">Reset</a>"
       "</td>"
       "</tr>"
       "</table>"
@@ -711,7 +797,7 @@ std::string Browser::generatePdfHtml(const std::string &target) {
       "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" "
       "style=\"width:100%;\">"
       "<tr>" +
-      tableContent +
+      bodyContent +
       "</tr>"
       "</table>"
       "</body></html>";
@@ -727,7 +813,8 @@ bool Browser::navigate(const std::string &url) {
   DEBUG_LOGF("Navigating to: %s", LogLevel::INFO, url.c_str());
 
   std::string target = url;
-  if (target.rfind("action://", 0) == 0) {
+  bool isAction = (target.rfind("action://", 0) == 0);
+  if (isAction) {
     if (target == "action://toggle-sidebar") {
       m_pdfSidebarOpen = !m_pdfSidebarOpen;
     } else if (target == "action://zoom-in") {
@@ -772,6 +859,9 @@ bool Browser::navigate(const std::string &url) {
   }
   m_cursorPos = m_urlText.size();
 
+  // Save current tab state before navigating
+  saveTabState(m_activeTab);
+
   std::vector<std::uint8_t> bytes;
   if (!fetchResource(target, bytes)) {
     m_status = "Failed to load: " + target;
@@ -791,6 +881,15 @@ bool Browser::navigate(const std::string &url) {
         target + "\" width=\"" +
         std::to_string(std::max(320, m_lastWidth ? m_lastWidth : 960)) +
         "\"></video></body></html>";
+    m_currentHtml = page;
+    if (!isAction && m_activeTab >= 0 &&
+        m_activeTab < static_cast<int>(m_tabHistory.size())) {
+      auto &hist = m_tabHistory[m_activeTab];
+      int idx = m_tabHistoryIndex[m_activeTab];
+      hist.resize(idx + 1);
+      hist.push_back({target, page});
+      m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+    }
     return loadHtml(page, target);
   }
 
@@ -801,6 +900,16 @@ bool Browser::navigate(const std::string &url) {
       (ext.empty() && LooksLikeHtml(bytes))) {
     std::string html(reinterpret_cast<const char *>(bytes.data()),
                      bytes.size());
+    m_currentHtml = html;
+    // Push to history (skip for action:// internal navigations)
+    if (!isAction && m_activeTab >= 0 &&
+        m_activeTab < static_cast<int>(m_tabHistory.size())) {
+      auto &hist = m_tabHistory[m_activeTab];
+      int idx = m_tabHistoryIndex[m_activeTab];
+      hist.resize(idx + 1);
+      hist.push_back({target, html});
+      m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+    }
     return loadHtml(html, target);
   }
 
@@ -812,6 +921,15 @@ bool Browser::navigate(const std::string &url) {
                        "</title></head><body style=\"margin:0\">"
                        "<img src=\"" +
                        target + "\"></body></html>";
+    m_currentHtml = page;
+    if (!isAction && m_activeTab >= 0 &&
+        m_activeTab < static_cast<int>(m_tabHistory.size())) {
+      auto &hist = m_tabHistory[m_activeTab];
+      int idx = m_tabHistoryIndex[m_activeTab];
+      hist.resize(idx + 1);
+      hist.push_back({target, page});
+      m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+    }
     return loadHtml(page, target);
   }
 
@@ -866,6 +984,15 @@ bool Browser::navigate(const std::string &url) {
           "pre { margin:16px; white-space:pre-wrap; word-wrap:break-word; }"
           "</style></head><body><pre>" +
           escaped + "</pre></body></html>";
+      m_currentHtml = page;
+      if (!isAction && m_activeTab >= 0 &&
+          m_activeTab < static_cast<int>(m_tabHistory.size())) {
+        auto &hist = m_tabHistory[m_activeTab];
+        int idx = m_tabHistoryIndex[m_activeTab];
+        hist.resize(idx + 1);
+        hist.push_back({target, page});
+        m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+      }
       return loadHtml(page, target);
     }
     // Non-inline types (audio, archives, binaries): show a placeholder page.
@@ -918,10 +1045,20 @@ bool Browser::navigate(const std::string &url) {
       "pre { margin:16px; white-space:pre-wrap; word-wrap:break-word; }"
       "</style></head><body><pre>" +
       escaped + "</pre></body></html>";
+  m_currentHtml = page;
+  if (!isAction && m_activeTab >= 0 &&
+      m_activeTab < static_cast<int>(m_tabHistory.size())) {
+    auto &hist = m_tabHistory[m_activeTab];
+    int idx = m_tabHistoryIndex[m_activeTab];
+    hist.resize(idx + 1);
+    hist.push_back({target, page});
+    m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+  }
   return loadHtml(page, target);
 }
 
 bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
+  m_currentHtml = html;
   if (!m_doc.parse(html)) {
     m_status = "Failed to parse document";
     m_hasDoc = false;
@@ -1250,7 +1387,8 @@ void Browser::compositeContent(Paint::Canvas &canvas,
         int pageNum = std::atoi(srcVal.c_str() + 11);
         float viewportTop = m_scrollY;
         float viewportBottom =
-            m_scrollY + static_cast<float>(m_lastHeight - kBrowserHeight);
+            m_scrollY +
+            static_cast<float>(m_lastHeight - kBrowserHeight - kTabBarHeight);
         // Only render and blit if the page intersects the scroll viewport
         if (c.y + c.height >= viewportTop && c.y <= viewportBottom) {
           auto &img = m_pdfPages[pageNum];
@@ -1426,24 +1564,102 @@ Paint::Canvas Browser::renderPage(int width, int height) {
   return page;
 }
 
+void Browser::drawTabBar(Paint::Canvas &canvas, int width) {
+  Paint::Color tabBg{0x3a, 0x3a, 0x3a, 255};
+  Paint::Color activeBg{0x55, 0x55, 0x55, 255};
+  Paint::Color inactiveBg{0x3a, 0x3a, 0x3a, 255};
+  Paint::Color border{0x22, 0x22, 0x22, 255};
+  Paint::Color textWhite{0xff, 0xff, 0xff, 255};
+  Paint::Color textGray{0xaa, 0xaa, 0xaa, 255};
+  Paint::Color plusBg{0x55, 0x55, 0x55, 255};
+
+  // Full tab bar background
+  FillRect(canvas, 0, 0, width, kTabBarHeight, tabBg);
+
+  int tabW = 140;
+  int x = 0;
+  int closeW = 16;
+
+  for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+    if (x + tabW + closeW + 4 > width - 40)
+      break; // leave room for + button
+
+    bool isActive = (i == m_activeTab);
+    Paint::Color bg = isActive ? activeBg : inactiveBg;
+    FillRect(canvas, x, 0, tabW, kTabBarHeight - 2, bg);
+    FillRect(canvas, x, kTabBarHeight - 2, tabW, 2, tabBg); // bottom gap
+
+    // Tab title
+    std::string title =
+        m_tabs[i].title.empty() ? m_tabs[i].url : m_tabs[i].title;
+    if (title.size() > 16) {
+      title = title.substr(0, 14) + "..";
+    }
+    Paint::Color col = isActive ? textWhite : textGray;
+    Font::drawText(canvas, x + 6, (kTabBarHeight - Font::lineHeight(12)) / 2,
+                   title, col, 12);
+
+    // Close button
+    int cbx = x + tabW - closeW - 2;
+    int cby = (kTabBarHeight - 14) / 2;
+    Font::drawText(canvas, cbx, cby, "x", textGray, 12);
+
+    // Separator
+    FillRect(canvas, x + tabW, 2, 1, kTabBarHeight - 4, border);
+    x += tabW + 1;
+  }
+
+  // + button
+  int plusX = x + 4;
+  FillRect(canvas, plusX, 4, 24, kTabBarHeight - 8, plusBg);
+  Font::drawText(canvas, plusX + 7, (kTabBarHeight - Font::lineHeight(14)) / 2,
+                 "+", textWhite, 14);
+
+  // Separator under tab bar
+  FillRect(canvas, 0, kTabBarHeight - 1, width, 1, border);
+}
+
 void Browser::drawBrowser(Paint::Canvas &canvas, int width) {
+  int barY = kTabBarHeight;
   Paint::Color barBg{0xdd, 0xdd, 0xdd, 255};
   Paint::Color border{0x88, 0x88, 0x88, 255};
+  Paint::Color btnBg{0xcc, 0xcc, 0xcc, 255};
+  Paint::Color btnHover{0xbb, 0xbb, 0xbb, 255};
 
-  FillRect(canvas, 0, 0, width, kBrowserHeight, barBg);
+  FillRect(canvas, 0, barY, width, kBrowserHeight, barBg);
 
-  int ix = 8, iy = 6, iw = width - 16, ih = kBrowserHeight - 12;
-  if (iw < 1) {
+  // Nav buttons: < > ↻  (Back, Forward, Reload)
+  int btnY = barY + 6;
+  int btnH = kBrowserHeight - 12;
+  int btnW = 26;
+  int bx = 8;
+  auto drawBtn = [&](const char *label, int x) {
+    FillRect(canvas, x, btnY, btnW, btnH, btnBg);
+    FillRect(canvas, x, btnY, btnW, 1, border);
+    FillRect(canvas, x, btnY + btnH - 1, btnW, 1, border);
+    FillRect(canvas, x, btnY, 1, btnH, border);
+    FillRect(canvas, x + btnW - 1, btnY, 1, btnH, border);
+    Font::drawText(canvas, x + 6, btnY + (btnH - Font::lineHeight(14)) / 2,
+                   label, kBlack, 14);
+  };
+  drawBtn("<", bx);
+  bx += btnW + 2;
+  drawBtn(">", bx);
+  bx += btnW + 2;
+  drawBtn("R", bx);
+  bx += btnW + 6;
+
+  // URL input field
+  int ix = bx, iy = btnY, iw = width - ix - 8, ih = btnH;
+  if (iw < 1)
     iw = 1;
-  }
   FillRect(canvas, ix, iy, iw, ih, kWhite);
-  // 1px border around the input field.
   FillRect(canvas, ix, iy, iw, 1, border);
   FillRect(canvas, ix, iy + ih - 1, iw, 1, border);
   FillRect(canvas, ix, iy, 1, ih, border);
   FillRect(canvas, ix + iw - 1, iy, 1, ih, border);
 
-  int px = 18;
+  int px = 14;
   int ty = iy + (ih - Font::lineHeight(px)) / 2;
 
   std::string displayUrl = m_urlText;
@@ -1454,8 +1670,8 @@ void Browser::drawBrowser(Paint::Canvas &canvas, int width) {
   }
   Font::drawText(canvas, ix + 4, ty, displayUrl, kBlack, px);
 
-  // Separator under the browser.
-  FillRect(canvas, 0, kBrowserHeight - 1, width, 1, border);
+  // Separator under the address bar.
+  FillRect(canvas, 0, barY + kBrowserHeight - 1, width, 1, border);
 }
 
 Paint::Canvas Browser::render(int width, int height) {
@@ -1471,10 +1687,12 @@ Paint::Canvas Browser::render(int width, int height) {
   Paint::Canvas canvas(width, height);
   canvas.clear(kWhite);
 
-  int pageViewportH = std::max(1, height - kBrowserHeight);
+  int chromeHeight = kBrowserHeight + kTabBarHeight;
+  int pageViewportH = std::max(1, height - chromeHeight);
 
   if (!m_hasDoc) {
-    Font::drawText(canvas, 8, kBrowserHeight + 8,
+    drawTabBar(canvas, width);
+    Font::drawText(canvas, 8, chromeHeight + 8,
                    m_status.empty() ? "No page loaded" : m_status, kBlack, 18);
     drawBrowser(canvas, width);
     return canvas;
@@ -1499,17 +1717,65 @@ Paint::Canvas Browser::render(int width, int height) {
     m_scrollY = static_cast<float>(maxScrollY);
   }
 
+  // Cache dimensions for scrollbar hit-testing
+  m_pageCanvasH = pageCanvasH;
+  m_pageViewportH = pageViewportH;
+  // DEBUG_LOG("[Scrollbar] pageCanvasH=%d pageViewportH=%d maxScrollY=%d "
+  //           "contentH=%.1f m_scrollY=%.1f",
+  //           pageCanvasH, pageViewportH, maxScrollY, contentH, m_scrollY);
+
   // 4. Copy the scrolled viewport slice onto canvas
+  int scrollbarArea = (maxScrollY > 0) ? kScrollbarWidth : 0;
+  int contentWidth = width - scrollbarArea;
   int startY = static_cast<int>(m_scrollY);
   for (int y = 0; y < pageViewportH; ++y) {
     int srcY = startY + y;
     if (srcY >= 0 && srcY < pageCanvasH) {
-      for (int x = 0; x < width; ++x) {
-        canvas.blendPixel(x, y + kBrowserHeight, page.at(x, srcY));
+      for (int x = 0; x < contentWidth; ++x) {
+        canvas.blendPixel(x, y + chromeHeight, page.at(x, srcY));
       }
     }
   }
 
+  // 5. Draw scrollbar
+  if (maxScrollY > 0) {
+    int sbX = width - kScrollbarWidth;
+    int sbY = chromeHeight;
+    int sbH = pageViewportH;
+
+    // Fill scrollbar area background
+    Paint::Color sbBg{0xe0, 0xe0, 0xe0, 255};
+    FillRect(canvas, sbX, sbY, kScrollbarWidth, sbH, sbBg);
+
+    // Track border left
+    Paint::Color trackBorder{0xaa, 0xaa, 0xaa, 255};
+    FillRect(canvas, sbX, sbY, 1, sbH, trackBorder);
+
+    // Thumb: height proportional to viewport/content ratio
+    int thumbH = std::max(40, (sbH * sbH) / pageCanvasH);
+    int maxThumbY = sbH - thumbH;
+    int thumbY = 0;
+    if (maxScrollY > 0) {
+      thumbY = static_cast<int>(static_cast<float>(maxThumbY) * m_scrollY /
+                                static_cast<float>(maxScrollY));
+    }
+    if (thumbY < 0)
+      thumbY = 0;
+    if (thumbY > maxThumbY)
+      thumbY = maxThumbY;
+
+    // Thumb body
+    Paint::Color thumbNorm{0xbb, 0xbb, 0xbb, 255};
+    FillRect(canvas, sbX + 2, sbY + thumbY, kScrollbarWidth - 4, thumbH,
+             thumbNorm);
+
+    // Thumb highlight
+    Paint::Color thumbHi{0xdd, 0xdd, 0xdd, 255};
+    FillRect(canvas, sbX + 3, sbY + thumbY + 1, kScrollbarWidth - 6,
+             std::max(1, thumbH - 2), thumbHi);
+  }
+
+  drawTabBar(canvas, width);
   drawBrowser(canvas, width);
   return canvas;
 }
@@ -1563,20 +1829,74 @@ int CharIndexAtX(const std::string &text, int fontSize, int tx, float px) {
 } // namespace
 
 bool Browser::handleClick(int x, int y) {
-  if (y < kBrowserHeight) {
-    return false; // clicked in browser area
+  int chromeHeight = kBrowserHeight + kTabBarHeight;
+
+  // Tab bar clicks
+  if (y < kTabBarHeight) {
+    int tabW = 140;
+    int cx = 0;
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+      if (cx + tabW + 16 + 4 > m_lastWidth - 40)
+        break;
+      // Close button area
+      int cbx = cx + tabW - 16 - 2;
+      if (x >= cbx && x < cbx + 16 && y >= 8 && y < kTabBarHeight - 8) {
+        closeTab(i);
+        return true;
+      }
+      // Tab body
+      if (x >= cx && x < cx + tabW) {
+        switchTab(i);
+        return true;
+      }
+      cx += tabW + 1;
+    }
+    // + button
+    int plusX = cx + 4;
+    if (x >= plusX && x < plusX + 24) {
+      newTab("about:blank");
+      return true;
+    }
+    return false;
   }
+
+  // Nav button clicks (inside address bar row)
+  if (y >= kTabBarHeight && y < chromeHeight) {
+    int btnY = kTabBarHeight + 6;
+    int btnH = kBrowserHeight - 12;
+    int btnW = 26;
+    int bx = 8;
+    // Back button
+    if (x >= bx && x < bx + btnW && y >= btnY && y < btnY + btnH) {
+      goBack();
+      return true;
+    }
+    bx += btnW + 2;
+    // Forward button
+    if (x >= bx && x < bx + btnW && y >= btnY && y < btnY + btnH) {
+      goForward();
+      return true;
+    }
+    bx += btnW + 2;
+    // Reload button
+    if (x >= bx && x < bx + btnW && y >= btnY && y < btnY + btnH) {
+      reload();
+      return true;
+    }
+    return false; // clicked in URL bar area, not a button
+  }
+
   if (!m_hasDoc) {
     return false;
   }
 
   // Re-run layout to find where elements are.
-  int pageH = std::max(1, m_lastHeight - kBrowserHeight);
+  int pageH = std::max(1, m_lastHeight - chromeHeight);
   Layout::LayoutBox box = Layout::layout(
       m_style, static_cast<float>(m_lastWidth), static_cast<float>(pageH));
 
   float px = static_cast<float>(x);
-  float py = static_cast<float>(y - kBrowserHeight) + m_scrollY;
+  float py = static_cast<float>(y - chromeHeight) + m_scrollY;
 
   const Layout::LayoutBox *found = FindBoxAt(box, px, py);
   if (found && found->node) {
@@ -1654,7 +1974,7 @@ std::vector<Browser::TextRun> Browser::layoutTextRuns() const {
   if (!m_hasDoc) {
     return runs;
   }
-  int pageH = std::max(1, m_lastHeight - kBrowserHeight);
+  int pageH = std::max(1, m_lastHeight - kBrowserHeight - kTabBarHeight);
   Layout::LayoutBox box = Layout::layout(
       m_style, static_cast<float>(m_lastWidth), static_cast<float>(pageH));
   collectTextRuns(box, runs);
@@ -1704,14 +2024,65 @@ Browser::SelPos Browser::hitTest(const std::vector<TextRun> &runs, float px,
 }
 
 bool Browser::handleMouseDown(int x, int y) {
-  if (y < kBrowserHeight || !m_hasDoc) {
+  int chromeHeight = kBrowserHeight + kTabBarHeight;
+
+  // Tab bar or nav-button clicks: route through handleClick immediately
+  if (y < chromeHeight) {
     m_selecting = false;
-    m_selAnchor = SelPos{};
-    m_selFocus = SelPos{};
+    m_scrollbarDragging = false;
+    return handleClick(x, y);
+  }
+
+  if (!m_hasDoc) {
+    m_selecting = false;
+    m_scrollbarDragging = false;
     return false;
   }
+
+  // Check scrollbar interaction
+  int maxScrollY = std::max(0, m_pageCanvasH - m_pageViewportH);
+  if (maxScrollY > 0 && m_lastWidth > kScrollbarWidth) {
+    int sbX = m_lastWidth - kScrollbarWidth;
+    if (x >= sbX) {
+      int sbH = m_pageViewportH;
+      int thumbH = std::max(30, (sbH * sbH) / m_pageCanvasH);
+      int maxThumbY = sbH - thumbH;
+      int thumbY = 0;
+      if (maxScrollY > 0) {
+        thumbY = static_cast<int>(static_cast<float>(maxThumbY) * m_scrollY /
+                                  static_cast<float>(maxScrollY));
+      }
+      if (thumbY < 0)
+        thumbY = 0;
+      if (thumbY > maxThumbY)
+        thumbY = maxThumbY;
+
+      int localY = y - chromeHeight;
+
+      // Click on thumb: start drag
+      if (localY >= thumbY && localY < thumbY + thumbH) {
+        m_scrollbarDragging = true;
+        m_scrollbarDragOffset = static_cast<float>(localY - thumbY);
+        m_selecting = false;
+        return false;
+      }
+
+      // Click on track: jump to position
+      float ratio = static_cast<float>(localY - thumbH / 2) /
+                    static_cast<float>(sbH - thumbH);
+      if (ratio < 0.0f)
+        ratio = 0.0f;
+      if (ratio > 1.0f)
+        ratio = 1.0f;
+      m_scrollY = ratio * static_cast<float>(maxScrollY);
+      updatePdfCurrentPageOnScroll();
+      m_selecting = false;
+      return true;
+    }
+  }
+
   float px = static_cast<float>(x);
-  float py = static_cast<float>(y - kBrowserHeight) + m_scrollY;
+  float py = static_cast<float>(y - chromeHeight) + m_scrollY;
   std::vector<TextRun> runs = layoutTextRuns();
   SelPos pos = hitTest(runs, px, py);
   m_selAnchor = pos;
@@ -1721,17 +2092,43 @@ bool Browser::handleMouseDown(int x, int y) {
 }
 
 bool Browser::handleMouseMove(int x, int y) {
+  // Handle scrollbar drag
+  if (m_scrollbarDragging && m_hasDoc) {
+    int maxScrollY = std::max(0, m_pageCanvasH - m_pageViewportH);
+    if (maxScrollY > 0) {
+      int chromeHeight = kBrowserHeight + kTabBarHeight;
+      int sbH = m_pageViewportH;
+      int thumbH = std::max(30, (sbH * sbH) / m_pageCanvasH);
+      int maxThumbY = sbH - thumbH;
+      float localY =
+          static_cast<float>(y - chromeHeight) - m_scrollbarDragOffset;
+      float ratio = localY / static_cast<float>(maxThumbY);
+      if (ratio < 0.0f)
+        ratio = 0.0f;
+      if (ratio > 1.0f)
+        ratio = 1.0f;
+      m_scrollY = ratio * static_cast<float>(maxScrollY);
+      updatePdfCurrentPageOnScroll();
+    }
+    return true;
+  }
+
   if (!m_selecting || !m_hasDoc) {
     return false;
   }
+  int chromeHeight = kBrowserHeight + kTabBarHeight;
   float px = static_cast<float>(x);
-  float py = static_cast<float>(y - kBrowserHeight) + m_scrollY;
+  float py = static_cast<float>(y - chromeHeight) + m_scrollY;
   std::vector<TextRun> runs = layoutTextRuns();
   m_selFocus = hitTest(runs, px, py);
   return true;
 }
 
 bool Browser::handleMouseUp(int x, int y) {
+  if (m_scrollbarDragging) {
+    m_scrollbarDragging = false;
+    return true;
+  }
   if (!m_selecting) {
     return false;
   }
@@ -1809,6 +2206,64 @@ void Browser::paintSelection(Paint::Canvas &canvas, int runIdx,
 }
 
 bool Browser::handleKey(const KeyInput &key) {
+  // --- Global shortcuts (Ctrl+key) ---
+  if (key.ctrl) {
+    if (key.kind == KeyInput::Char) {
+      if (key.ch == 't' || key.ch == 'T') {
+        newTab("https://www.google.com/");
+        return true;
+      }
+      if (key.ch == 'w' || key.ch == 'W') {
+        closeTab(m_activeTab);
+        return true;
+      }
+      if (key.ch == 'l' || key.ch == 'L') {
+        // Focus URL bar (clear and select all)
+        m_urlText.clear();
+        m_cursorPos = 0;
+        return true;
+      }
+    }
+    if (key.kind == KeyInput::Tab) {
+      // Ctrl+Tab: next tab, Ctrl+Shift+Tab: prev tab
+      if (key.shift) {
+        int prev = m_activeTab - 1;
+        if (prev < 0)
+          prev = static_cast<int>(m_tabs.size()) - 1;
+        switchTab(prev);
+      } else {
+        int next = m_activeTab + 1;
+        if (next >= static_cast<int>(m_tabs.size()))
+          next = 0;
+        switchTab(next);
+      }
+      return true;
+    }
+    if (key.kind == KeyInput::Left) {
+      goBack();
+      return true;
+    }
+    if (key.kind == KeyInput::Right) {
+      goForward();
+      return true;
+    }
+    return false;
+  }
+
+  // --- Alt shortcuts ---
+  if (key.alt) {
+    if (key.kind == KeyInput::Left) {
+      goBack();
+      return true;
+    }
+    if (key.kind == KeyInput::Right) {
+      goForward();
+      return true;
+    }
+    return false;
+  }
+
+  // --- Regular keys ---
   switch (key.kind) {
   case KeyInput::Char:
     if (m_cursorPos <= m_urlText.size()) {
@@ -1855,6 +2310,9 @@ bool Browser::handleKey(const KeyInput &key) {
     m_scrollY += 30.0f;
     updatePdfCurrentPageOnScroll();
     return true;
+
+  default:
+    break;
   }
   return false;
 }
@@ -1865,6 +2323,113 @@ bool Browser::handleScroll(int delta) {
     m_scrollY = 0.0f;
   }
   updatePdfCurrentPageOnScroll();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Navigation: Back / Forward / Reload
+// ---------------------------------------------------------------------------
+
+bool Browser::goBack() {
+  if (m_activeTab < 0 || m_activeTab >= static_cast<int>(m_tabHistory.size())) {
+    return false;
+  }
+  int &idx = m_tabHistoryIndex[m_activeTab];
+  auto &hist = m_tabHistory[m_activeTab];
+  if (idx <= 0)
+    return false;
+  saveTabState(m_activeTab);
+  idx--;
+  const HistoryEntry &entry = hist[idx];
+  m_currentHtml = entry.htmlContent;
+  if (!entry.htmlContent.empty()) {
+    loadHtml(entry.htmlContent, entry.url);
+  } else {
+    navigate(entry.url);
+  }
+  return true;
+}
+
+bool Browser::goForward() {
+  if (m_activeTab < 0 || m_activeTab >= static_cast<int>(m_tabHistory.size())) {
+    return false;
+  }
+  int &idx = m_tabHistoryIndex[m_activeTab];
+  auto &hist = m_tabHistory[m_activeTab];
+  if (idx >= static_cast<int>(hist.size()) - 1)
+    return false;
+  saveTabState(m_activeTab);
+  idx++;
+  const HistoryEntry &entry = hist[idx];
+  m_currentHtml = entry.htmlContent;
+  if (!entry.htmlContent.empty()) {
+    loadHtml(entry.htmlContent, entry.url);
+  } else {
+    navigate(entry.url);
+  }
+  return true;
+}
+
+bool Browser::reload() {
+  if (!m_currentHtml.empty()) {
+    return loadHtml(m_currentHtml, m_currentUrl);
+  }
+  if (!m_currentUrl.empty()) {
+    return navigate(m_currentUrl);
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Tab management
+// ---------------------------------------------------------------------------
+
+bool Browser::newTab(const std::string &url) {
+  saveTabState(m_activeTab);
+  Tab blank;
+  blank.url = url;
+  blank.title = "New Tab";
+  m_tabs.push_back(blank);
+  m_tabHistory.push_back({HistoryEntry{url, ""}});
+  m_tabHistoryIndex.push_back(0);
+  m_activeTab = static_cast<int>(m_tabs.size()) - 1;
+  if (url == "about:blank" || url.empty()) {
+    m_currentUrl = url;
+    m_urlText = "";
+    m_cursorPos = 0;
+    m_hasDoc = false;
+    m_status = "No page loaded";
+    m_scrollY = 0;
+    m_title.clear();
+  } else {
+    navigate(url);
+  }
+  return true;
+}
+
+bool Browser::closeTab(int index) {
+  if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+    return false;
+  if (m_tabs.size() == 1)
+    return false; // don't close last tab
+  m_tabs.erase(m_tabs.begin() + index);
+  m_tabHistory.erase(m_tabHistory.begin() + index);
+  m_tabHistoryIndex.erase(m_tabHistoryIndex.begin() + index);
+  if (m_activeTab >= static_cast<int>(m_tabs.size())) {
+    m_activeTab = static_cast<int>(m_tabs.size()) - 1;
+  }
+  restoreTabState(m_activeTab);
+  return true;
+}
+
+bool Browser::switchTab(int index) {
+  if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+    return false;
+  if (index == m_activeTab)
+    return true;
+  saveTabState(m_activeTab);
+  m_activeTab = index;
+  restoreTabState(index);
   return true;
 }
 

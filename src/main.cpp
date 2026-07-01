@@ -32,6 +32,9 @@ int main(int argc, char **argv) {
 
   window.SetKeyCallback([&browser](const BaseWindow::Key &k) {
     Browser::KeyInput in;
+    in.ctrl = k.ctrl;
+    in.shift = k.shift;
+    in.alt = k.alt;
     switch (k.kind) {
     case BaseWindow::Key::Char:
       in.kind = Browser::KeyInput::Char;
@@ -54,6 +57,12 @@ int main(int argc, char **argv) {
       break;
     case BaseWindow::Key::Down:
       in.kind = Browser::KeyInput::Down;
+      break;
+    case BaseWindow::Key::Tab:
+      in.kind = Browser::KeyInput::Tab;
+      break;
+    case BaseWindow::Key::Delete:
+      in.kind = Browser::KeyInput::Delete;
       break;
     }
     return browser.handleKey(in);

@@ -897,11 +897,18 @@ void BaseWindow::Run() {
           running = false;
         } else if (m_key) {
           Key e;
+          e.ctrl = (event.xkey.state & ControlMask) != 0;
+          e.shift = (event.xkey.state & ShiftMask) != 0;
+          e.alt = (event.xkey.state & Mod1Mask) != 0;
           bool deliver = true;
           if (ks == XK_Return || ks == XK_KP_Enter) {
             e.kind = Key::Enter;
           } else if (ks == XK_BackSpace) {
             e.kind = Key::Backspace;
+          } else if (ks == XK_Tab) {
+            e.kind = Key::Tab;
+          } else if (ks == XK_Delete) {
+            e.kind = Key::Delete;
           } else if (ks == XK_Left) {
             e.kind = Key::Left;
           } else if (ks == XK_Right) {
@@ -910,6 +917,15 @@ void BaseWindow::Run() {
             e.kind = Key::Up;
           } else if (ks == XK_Down) {
             e.kind = Key::Down;
+          } else if (e.ctrl) {
+            // Ctrl+key: extract the base letter from keysym
+            // XK_a=0x61 .. XK_z=0x7a, XK_t=0x74 etc.
+            if (ks >= 0x61 && ks <= 0x7a) {
+              e.kind = Key::Char;
+              e.ch = static_cast<char>(ks);
+            } else {
+              deliver = false;
+            }
           } else if (n == 1 && buf[0] >= 32 && buf[0] < 127) {
             e.kind = Key::Char;
             e.ch = buf[0];

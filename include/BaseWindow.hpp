@@ -36,9 +36,12 @@ public:
 
   // A keyboard event delivered to the application (e.g. the address bar).
   struct Key {
-    enum Kind { Char, Backspace, Enter, Left, Right, Up, Down };
+    enum Kind { Char, Backspace, Enter, Left, Right, Up, Down, Tab, Delete };
     Kind kind = Char;
     char ch = 0;
+    bool ctrl = false;
+    bool shift = false;
+    bool alt = false;
   };
   // Invoked on text input / editing keys. Returning true requests a repaint.
   using KeyCallback = std::function<bool(const Key &)>;
