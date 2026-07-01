@@ -8,6 +8,7 @@
 #include "Wrapper.hpp"
 
 #include "Video.hpp"
+#include "AudioPlayer.hpp"
 #include <chrono>
 #include <functional>
 #include <map>
@@ -101,6 +102,7 @@ private:
 
   void annotateSizes(Layout::StyledNode &node);
   void compositeContent(Paint::Canvas &canvas, const Layout::LayoutBox &box);
+  void updateAudioPageDom();
 
   // Tab state save/restore
   void saveTabState(int index);
@@ -156,6 +158,7 @@ private:
   std::vector<std::uint8_t> m_pdfBytes;
   std::map<int, Image::Bitmap> m_pdfPages;
   std::map<std::string, std::unique_ptr<Video::VideoSource>> m_videos;
+  Audio::AudioPlayer m_audioPlayer;
   std::chrono::steady_clock::time_point m_startTime;
 
   int m_lastWidth = 1024;

@@ -1,5 +1,5 @@
-#include "../include/Audio.hpp"
 #include "../include/Video.hpp"
+#include "../include/Audio.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -150,7 +150,7 @@ struct FfmpegVideoSource::Impl {
   AVCodecContext *audioCodecCtx = nullptr;
   SwrContext *audioSwr = nullptr;
   AVFrame *audioFrame = nullptr;
-  AVFormatContext *audioFmt = nullptr;     // separate fmt ctx for audio thread
+  AVFormatContext *audioFmt = nullptr; // separate fmt ctx for audio thread
   int audioSampleRateVal = 0;
   int audioChannelsVal = 0;
   std::thread audioThread;
@@ -334,8 +334,8 @@ struct FfmpegVideoSource::Impl {
     }
 
     // Re-find audio stream index in the separate audio format context.
-    int aIdx = av_find_best_stream(audioFmt, AVMEDIA_TYPE_AUDIO, -1, -1,
-                                   nullptr, 0);
+    int aIdx =
+        av_find_best_stream(audioFmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     if (aIdx < 0) {
       avcodec_free_context(&audioCodecCtx);
       audioCodecCtx = nullptr;
@@ -380,11 +380,10 @@ struct FfmpegVideoSource::Impl {
                         0, nullptr);
 #else
     int64_t outLayout = av_get_default_channel_layout(audioChannelsVal);
-    audioSwr = swr_alloc_set_opts(nullptr, outLayout, AV_SAMPLE_FMT_S16,
-                                  audioSampleRateVal,
-                                  audioCodecCtx->channel_layout,
-                                  audioCodecCtx->sample_fmt,
-                                  audioCodecCtx->sample_rate, 0, nullptr);
+    audioSwr = swr_alloc_set_opts(
+        nullptr, outLayout, AV_SAMPLE_FMT_S16, audioSampleRateVal,
+        audioCodecCtx->channel_layout, audioCodecCtx->sample_fmt,
+        audioCodecCtx->sample_rate, 0, nullptr);
 #endif
     if (!audioSwr || swr_init(audioSwr) < 0) {
       swr_free(&audioSwr);
@@ -423,8 +422,7 @@ struct FfmpegVideoSource::Impl {
 
     // Seek audio stream to beginning.
     AVStream *st = audioFmt->streams[audioStreamIndex];
-    int64_t seekTs =
-        (st->start_time == AV_NOPTS_VALUE) ? 0 : st->start_time;
+    int64_t seekTs = (st->start_time == AV_NOPTS_VALUE) ? 0 : st->start_time;
     av_seek_frame(audioFmt, audioStreamIndex, seekTs, AVSEEK_FLAG_BACKWARD);
     avcodec_flush_buffers(audioCodecCtx);
 
@@ -437,16 +435,14 @@ struct FfmpegVideoSource::Impl {
             swr_get_delay(audioSwr, audioCodecCtx->sample_rate) +
                 audioFrame->nb_samples,
             audioSampleRateVal, audioCodecCtx->sample_rate, AV_ROUND_UP);
-        int bufSize = av_samples_get_buffer_size(nullptr, audioChannelsVal,
-                                                  outSamples, AV_SAMPLE_FMT_S16,
-                                                  1);
-        resampleBuf =
-            static_cast<uint8_t *>(av_realloc(resampleBuf, bufSize));
+        int bufSize = av_samples_get_buffer_size(
+            nullptr, audioChannelsVal, outSamples, AV_SAMPLE_FMT_S16, 1);
+        resampleBuf = static_cast<uint8_t *>(av_realloc(resampleBuf, bufSize));
         uint8_t *planes[1] = {resampleBuf};
-        int converted = swr_convert(
-            audioSwr, planes, outSamples,
-            const_cast<const uint8_t **>(audioFrame->extended_data),
-            audioFrame->nb_samples);
+        int converted =
+            swr_convert(audioSwr, planes, outSamples,
+                        const_cast<const uint8_t **>(audioFrame->extended_data),
+                        audioFrame->nb_samples);
         if (converted > 0) {
           audioOut.write(reinterpret_cast<const int16_t *>(resampleBuf),
                          converted);

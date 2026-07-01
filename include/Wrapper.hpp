@@ -48,6 +48,7 @@ public:
   // when the attribute is absent.
   std::string attribute(const std::string &name) const;
   bool hasAttribute(const std::string &name) const;
+  void setAttribute(const std::string &name, const std::string &value);
 
   // Tree navigation. Each returns an invalid Node when there is nothing there.
   Node parent() const;

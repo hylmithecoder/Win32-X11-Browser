@@ -140,6 +140,14 @@ bool Node::hasAttribute(const std::string &name) const {
          nullptr;
 }
 
+void Node::setAttribute(const std::string &name, const std::string &value) {
+  if (!isElement()) {
+    return;
+  }
+  xmlSetProp(m_node, reinterpret_cast<const xmlChar *>(name.c_str()),
+             reinterpret_cast<const xmlChar *>(value.c_str()));
+}
+
 Node Node::parent() const {
   return Node(m_node != nullptr ? m_node->parent : nullptr);
 }

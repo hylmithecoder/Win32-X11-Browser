@@ -132,6 +132,12 @@ bool IsVideoExtension(const std::string &ext) {
          ext == "mov" || ext == "m4v" || ext == "ogv";
 }
 
+// True for audio extensions we can decode via ffmpeg.
+bool IsAudioExtension(const std::string &ext) {
+  return ext == "mp3" || ext == "wav" || ext == "ogg" || ext == "flac" ||
+         ext == "aac" || ext == "m4a";
+}
+
 // True for raster image extensions the Image decoder (stb_image) can handle.
 bool IsImageExtension(const std::string &ext) {
   return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
@@ -891,6 +897,92 @@ bool Browser::navigate(const std::string &url) {
       m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
     }
     return loadHtml(page, target);
+  }
+
+  // Audio: decode natively + play via AudioOutput (ALSA/WASAPI)
+  if (IsAudioExtension(ext)) {
+    m_audioPlayer.stop();
+    std::string displayName = target;
+    auto slash = displayName.rfind('/');
+    if (slash != std::string::npos)
+      displayName = displayName.substr(slash + 1);
+
+    // Decode first so we can query duration for the HTML page
+    bool loaded = m_audioPlayer.loadData(bytes, ext);
+    if (!loaded) {
+      m_status = "Failed to decode audio: " + target;
+      m_hasDoc = false;
+      return false;
+    }
+
+    double dur = m_audioPlayer.durationSeconds();
+    int durMin = static_cast<int>(dur) / 60;
+    int durSec = static_cast<int>(dur) % 60;
+    char durStr[16];
+    std::snprintf(durStr, sizeof(durStr), "%d:%02d", durMin, durSec);
+    std::string page =
+        "<html><head><title>" + displayName +
+        "</title></head>"
+        "<body style=\"background:#1a1a2e;color:#d4d4d4;font-family:sans-serif;"
+        "text-align:center;padding:60px 20px;margin:0\">"
+        "<div style=\"font-size:60px;margin-bottom:16px\">&#9835;</div>"
+        "<div style=\"font-size:18px;margin-bottom:16px\">" +
+        displayName +
+        "</div>"
+        // Seek bar
+        "<div id=\"seek-bar\" "
+        "style=\"width:360px;height:8px;background:#333;"
+        "margin:16px auto 4px auto\">"
+        "<div id=\"seek-fill\" "
+        "style=\"width:0%;height:100%;background:#4a9eff"
+        "\"></div>"
+        "</div>"
+        // Time display
+        "<div style=\"width:360px;margin:0 auto\">"
+        "<div style=\"float:left;font-size:12px;color:#888\" "
+        "id=\"current-time\">0:00</div>"
+        "<div style=\"float:right;font-size:12px;color:#888\">" +
+        std::string(durStr) +
+        "</div>"
+        "<div style=\"clear:both\"></div>"
+        "</div>"
+        // Control buttons
+        "<div style=\"margin-top:24px\">"
+        "<span id=\"replay\" "
+        "style=\"font-size:14px;padding:6px 14px;border:1px solid #555;"
+        "background:#2a2a4e;margin:0 8px;cursor:pointer\">"
+        "Replay</span>"
+        "<span id=\"play-pause\" "
+        "style=\"font-size:14px;padding:6px 14px;border:1px solid #555;"
+        "background:#2a2a4e;margin:0 8px;cursor:pointer\">"
+        "Pause</span>"
+        // Stop button
+        "<span id=\"stop-btn\" "
+        "style=\"font-size:14px;padding:6px 14px;border:1px solid #555;"
+        "background:#2a2a4e;margin:0 8px;cursor:pointer\">"
+        "Stop</span>"
+        "</div>"
+        "<div id=\"status\" "
+        "style=\"font-size:13px;color:#888;margin-top:20px\">"
+        "Playing 0:00 / " +
+        std::string(durStr) +
+        "</div>"
+        "</body></html>";
+    m_currentHtml = page;
+    if (!isAction && m_activeTab >= 0 &&
+        m_activeTab < static_cast<int>(m_tabHistory.size())) {
+      auto &hist = m_tabHistory[m_activeTab];
+      int idx = m_tabHistoryIndex[m_activeTab];
+      hist.resize(idx + 1);
+      hist.push_back({target, page});
+      m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+    }
+    bool ok = loadHtml(page, target);
+    if (ok) {
+      m_audioPlayer.startPlayback();
+      updateAudioPageDom();
+    }
+    return ok;
   }
 
   // HTML files are parsed and rendered as documents, not shown as raw text.
@@ -1663,15 +1755,19 @@ void Browser::drawBrowser(Paint::Canvas &canvas, int width) {
   int ty = iy + (ih - Font::lineHeight(px)) / 2;
 
   // Draw selection highlight in URL bar
-  if (m_urlSelAnchor >= 0 && m_urlSelFocus >= 0 && m_urlSelAnchor != m_urlSelFocus) {
+  if (m_urlSelAnchor >= 0 && m_urlSelFocus >= 0 &&
+      m_urlSelAnchor != m_urlSelFocus) {
     int a = std::min(m_urlSelAnchor, m_urlSelFocus);
     int b = std::max(m_urlSelAnchor, m_urlSelFocus);
-    if (a < 0) a = 0;
-    if (b > static_cast<int>(m_urlText.size())) b = static_cast<int>(m_urlText.size());
+    if (a < 0)
+      a = 0;
+    if (b > static_cast<int>(m_urlText.size()))
+      b = static_cast<int>(m_urlText.size());
     int selX1 = ix + 4 + Font::textWidth(m_urlText.substr(0, a), px);
     int selX2 = ix + 4 + Font::textWidth(m_urlText.substr(0, b), px);
     Paint::Color selBg{0x33, 0x99, 0xff, 255};
-    FillRect(canvas, selX1, ty - 2, selX2 - selX1, Font::lineHeight(px) + 4, selBg);
+    FillRect(canvas, selX1, ty - 2, selX2 - selX1, Font::lineHeight(px) + 4,
+             selBg);
     // Draw selected text in white, rest in black
     Font::drawText(canvas, ix + 4, ty, m_urlText.substr(0, a), kBlack, px);
     Font::drawText(canvas, selX1, ty, m_urlText.substr(a, b - a), kWhite, px);
@@ -1821,6 +1917,20 @@ const Layout::LayoutBox *FindBoxAt(const Layout::LayoutBox &box, float px,
   return &box;
 }
 
+const Layout::LayoutBox *FindBoxById(const Layout::LayoutBox &box,
+                                     const std::string &id) {
+  if (box.node && box.node->node.isElement() &&
+      box.node->node.attribute("id") == id) {
+    return &box;
+  }
+  for (const auto &child : box.children) {
+    const Layout::LayoutBox *found = FindBoxById(child, id);
+    if (found)
+      return found;
+  }
+  return nullptr;
+}
+
 // Text-selection highlight colour (light blue, drawn behind selected glyphs).
 const Paint::Color kSelectionBg{0xb3, 0xd7, 0xff, 255};
 
@@ -1843,6 +1953,43 @@ int CharIndexAtX(const std::string &text, int fontSize, int tx, float px) {
 }
 
 } // namespace
+
+void Browser::updateAudioPageDom() {
+  if (!m_hasDoc)
+    return;
+  double dur = m_audioPlayer.durationSeconds();
+  double pos = m_audioPlayer.currentPosition();
+  double frac = (dur > 0.0) ? std::min(1.0, pos / dur) : 0.0;
+  int posMin = static_cast<int>(pos) / 60;
+  int posSec = static_cast<int>(pos) % 60;
+  char posStr[16];
+  std::snprintf(posStr, sizeof(posStr), "%d:%02d", posMin, posSec);
+  bool paused = m_audioPlayer.isPaused();
+  std::string timeStr(posStr);
+
+  Wrapper::Node statusEl = m_doc.getElementById("status");
+  Wrapper::Node timeEl = m_doc.getElementById("current-time");
+  Wrapper::Node fillEl = m_doc.getElementById("seek-fill");
+  Wrapper::Node ppEl = m_doc.getElementById("play-pause");
+
+  if (statusEl)
+    statusEl.setText((paused ? "Paused " : "Playing ") + timeStr);
+  if (timeEl)
+    timeEl.setText(timeStr);
+  if (fillEl) {
+    std::string w = std::to_string(static_cast<int>(frac * 100.0)) + "%";
+    fillEl.setAttribute("style",
+                        "width:" + w + ";height:100%;background:#4a9eff;"
+                        "border-radius:3px");
+  }
+  if (ppEl)
+    ppEl.setText(paused ? "Play" : "Pause");
+
+  if (statusEl || timeEl || fillEl || ppEl) {
+    m_style = Layout::styleTree(m_doc.root(), m_sheet);
+    annotateSizes(m_style);
+  }
+}
 
 bool Browser::handleClick(int x, int y) {
   int chromeHeight = kBrowserHeight + kTabBarHeight;
@@ -1905,7 +2052,7 @@ bool Browser::handleClick(int x, int y) {
     int urlEndX = m_lastWidth - 8;
     if (x >= urlStartX && x <= urlEndX) {
       int clickInText = x - urlStartX - 4; // 4px text padding
-      int px = 14; // font size matches drawBrowser
+      int px = 14;                         // font size matches drawBrowser
       // Find closest character boundary
       size_t bestPos = 0;
       int bestDist = std::abs(clickInText);
@@ -1950,6 +2097,63 @@ bool Browser::handleClick(int x, int y) {
         }
       }
       n = n.parent();
+    }
+
+    // Audio player controls (id-based click handling)
+    Wrapper::Node targetEl = found->node->node;
+    std::string id;
+    for (Wrapper::Node walk = targetEl; walk; walk = walk.parent()) {
+      if (walk.isElement()) {
+        id = walk.attribute("id");
+        if (!id.empty())
+          break;
+      }
+    }
+    if (!id.empty() && m_audioPlayer.durationSeconds() > 0.0) {
+      if (id == "play-pause") {
+        if (m_audioPlayer.isPaused())
+          m_audioPlayer.resume();
+        else
+          m_audioPlayer.pause();
+        updateAudioPageDom();
+        return true;
+      }
+      if (id == "replay") {
+        m_audioPlayer.seek(0.0);
+        if (m_audioPlayer.isPaused())
+          m_audioPlayer.resume();
+        updateAudioPageDom();
+        return true;
+      }
+      if (id == "stop-btn") {
+        m_audioPlayer.stop();
+        updateAudioPageDom();
+        return true;
+      }
+      if (id == "seek-bar" || id == "seek-progress" ||
+          id == "seek-fill" || id == "seek-thumb") {
+        // Walk up to the seek-bar container to get its dimensions
+        Wrapper::Node seekBar = targetEl;
+        while (seekBar && seekBar.attribute("id") != "seek-bar")
+          seekBar = seekBar.parent();
+        if (seekBar && seekBar.isElement()) {
+          // Re-layout to get accurate box dimensions
+          Layout::LayoutBox root = Layout::layout(
+              m_style, static_cast<float>(m_lastWidth),
+              static_cast<float>(std::max(1, m_lastHeight - chromeHeight)));
+          const Layout::LayoutBox *seekBox = FindBoxById(root, "seek-bar");
+          if (seekBox) {
+            const auto &c = seekBox->dimensions.content;
+            float relX = px - c.x;
+            float frac = std::max(0.0f, std::min(1.0f, relX / c.width));
+            double dur = m_audioPlayer.durationSeconds();
+            m_audioPlayer.seek(frac * dur);
+            updateAudioPageDom();
+            return true;
+          }
+        }
+        return true;
+      }
     }
   }
   return false;
@@ -2139,8 +2343,10 @@ bool Browser::handleMouseMove(int x, int y) {
     int urlStartX = 8 + btnW + 2 + btnW + 2 + btnW + 6;
     int urlEndX = m_lastWidth - 8;
     int clampedX = x;
-    if (clampedX < urlStartX) clampedX = urlStartX;
-    if (clampedX > urlEndX) clampedX = urlEndX;
+    if (clampedX < urlStartX)
+      clampedX = urlStartX;
+    if (clampedX > urlEndX)
+      clampedX = urlEndX;
     int clickInText = clampedX - urlStartX - 4;
     int px = 14;
     size_t bestPos = 0;
@@ -2148,7 +2354,10 @@ bool Browser::handleMouseMove(int x, int y) {
     for (size_t i = 1; i <= m_urlText.size(); ++i) {
       int tw = Font::textWidth(m_urlText.substr(0, i), px);
       int dist = std::abs(clickInText - tw);
-      if (dist < bestDist) { bestDist = dist; bestPos = i; }
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPos = i;
+      }
     }
     m_urlSelFocus = static_cast<int>(bestPos);
     m_cursorPos = bestPos;
@@ -2290,7 +2499,8 @@ bool Browser::handleKey(const KeyInput &key) {
       }
       if (key.ch == 'v' || key.ch == 'V') {
         // Paste from clipboard (async via X11)
-        if (m_requestPaste) m_requestPaste();
+        if (m_requestPaste)
+          m_requestPaste();
         return true;
       }
       if (key.ch == 'a' || key.ch == 'A') {
@@ -2317,39 +2527,60 @@ bool Browser::handleKey(const KeyInput &key) {
     if (key.kind == KeyInput::Tab) {
       if (key.shift) {
         int prev = m_activeTab - 1;
-        if (prev < 0) prev = static_cast<int>(m_tabs.size()) - 1;
+        if (prev < 0)
+          prev = static_cast<int>(m_tabs.size()) - 1;
         switchTab(prev);
       } else {
         int next = m_activeTab + 1;
-        if (next >= static_cast<int>(m_tabs.size())) next = 0;
+        if (next >= static_cast<int>(m_tabs.size()))
+          next = 0;
         switchTab(next);
       }
       return true;
     }
-    if (key.kind == KeyInput::Left) { goBack(); return true; }
-    if (key.kind == KeyInput::Right) { goForward(); return true; }
+    if (key.kind == KeyInput::Left) {
+      goBack();
+      return true;
+    }
+    if (key.kind == KeyInput::Right) {
+      goForward();
+      return true;
+    }
     return false;
   }
 
   // --- Alt shortcuts ---
   if (key.alt) {
-    if (key.kind == KeyInput::Left) { goBack(); return true; }
-    if (key.kind == KeyInput::Right) { goForward(); return true; }
+    if (key.kind == KeyInput::Left) {
+      goBack();
+      return true;
+    }
+    if (key.kind == KeyInput::Right) {
+      goForward();
+      return true;
+    }
     return false;
   }
 
   // --- Shift + Arrow: extend selection ---
-  if (key.shift && (key.kind == KeyInput::Left || key.kind == KeyInput::Right)) {
-    if (m_urlSelAnchor < 0) m_urlSelAnchor = static_cast<int>(m_cursorPos);
-    if (key.kind == KeyInput::Left && m_cursorPos > 0) m_cursorPos--;
-    if (key.kind == KeyInput::Right && m_cursorPos < m_urlText.size()) m_cursorPos++;
+  if (key.shift &&
+      (key.kind == KeyInput::Left || key.kind == KeyInput::Right)) {
+    if (m_urlSelAnchor < 0)
+      m_urlSelAnchor = static_cast<int>(m_cursorPos);
+    if (key.kind == KeyInput::Left && m_cursorPos > 0)
+      m_cursorPos--;
+    if (key.kind == KeyInput::Right && m_cursorPos < m_urlText.size())
+      m_cursorPos++;
     m_urlSelFocus = static_cast<int>(m_cursorPos);
     return true;
   }
   if (key.shift && (key.kind == KeyInput::Home || key.kind == KeyInput::End)) {
-    if (m_urlSelAnchor < 0) m_urlSelAnchor = static_cast<int>(m_cursorPos);
-    if (key.kind == KeyInput::Home) m_cursorPos = 0;
-    if (key.kind == KeyInput::End) m_cursorPos = m_urlText.size();
+    if (m_urlSelAnchor < 0)
+      m_urlSelAnchor = static_cast<int>(m_cursorPos);
+    if (key.kind == KeyInput::Home)
+      m_cursorPos = 0;
+    if (key.kind == KeyInput::End)
+      m_cursorPos = m_urlText.size();
     m_urlSelFocus = static_cast<int>(m_cursorPos);
     return true;
   }
@@ -2358,7 +2589,8 @@ bool Browser::handleKey(const KeyInput &key) {
                        m_urlSelAnchor != m_urlSelFocus);
 
   if (key.kind == KeyInput::Char) {
-    if (hasSelection) urlBarDeleteSelection();
+    if (hasSelection)
+      urlBarDeleteSelection();
     m_urlText.insert(m_cursorPos, 1, key.ch);
     m_cursorPos++;
     m_urlSelAnchor = -1;
@@ -2367,7 +2599,10 @@ bool Browser::handleKey(const KeyInput &key) {
   }
 
   if (key.kind == KeyInput::Backspace) {
-    if (hasSelection) { urlBarDeleteSelection(); return true; }
+    if (hasSelection) {
+      urlBarDeleteSelection();
+      return true;
+    }
     if (m_cursorPos > 0 && !m_urlText.empty()) {
       m_urlText.erase(m_cursorPos - 1, 1);
       m_cursorPos--;
@@ -2377,7 +2612,10 @@ bool Browser::handleKey(const KeyInput &key) {
   }
 
   if (key.kind == KeyInput::Delete) {
-    if (hasSelection) { urlBarDeleteSelection(); return true; }
+    if (hasSelection) {
+      urlBarDeleteSelection();
+      return true;
+    }
     if (m_cursorPos < m_urlText.size()) {
       m_urlText.erase(m_cursorPos, 1);
       return true;
@@ -2386,25 +2624,39 @@ bool Browser::handleKey(const KeyInput &key) {
   }
 
   if (key.kind == KeyInput::Left) {
-    m_urlSelAnchor = -1; m_urlSelFocus = -1;
-    if (m_cursorPos > 0) { m_cursorPos--; return true; }
+    m_urlSelAnchor = -1;
+    m_urlSelFocus = -1;
+    if (m_cursorPos > 0) {
+      m_cursorPos--;
+      return true;
+    }
     return false;
   }
   if (key.kind == KeyInput::Right) {
-    m_urlSelAnchor = -1; m_urlSelFocus = -1;
-    if (m_cursorPos < m_urlText.size()) { m_cursorPos++; return true; }
+    m_urlSelAnchor = -1;
+    m_urlSelFocus = -1;
+    if (m_cursorPos < m_urlText.size()) {
+      m_cursorPos++;
+      return true;
+    }
     return false;
   }
   if (key.kind == KeyInput::Home) {
-    m_urlSelAnchor = -1; m_urlSelFocus = -1; m_cursorPos = 0; return true;
+    m_urlSelAnchor = -1;
+    m_urlSelFocus = -1;
+    m_cursorPos = 0;
+    return true;
   }
   if (key.kind == KeyInput::End) {
-    m_urlSelAnchor = -1; m_urlSelFocus = -1;
-    m_cursorPos = m_urlText.size(); return true;
+    m_urlSelAnchor = -1;
+    m_urlSelFocus = -1;
+    m_cursorPos = m_urlText.size();
+    return true;
   }
 
   if (key.kind == KeyInput::Enter) {
-    m_urlSelAnchor = -1; m_urlSelFocus = -1;
+    m_urlSelAnchor = -1;
+    m_urlSelFocus = -1;
     navigate(m_urlText);
     return true;
   }
@@ -2544,22 +2796,30 @@ bool Browser::switchTab(int index) {
 // ---------------------------------------------------------------------------
 
 std::string Browser::urlBarSelectedText() const {
-  if (m_urlSelAnchor < 0 || m_urlSelFocus < 0) return "";
+  if (m_urlSelAnchor < 0 || m_urlSelFocus < 0)
+    return "";
   int a = std::min(m_urlSelAnchor, m_urlSelFocus);
   int b = std::max(m_urlSelAnchor, m_urlSelFocus);
-  if (a == b) return "";
-  if (a < 0) a = 0;
-  if (b > static_cast<int>(m_urlText.size())) b = static_cast<int>(m_urlText.size());
+  if (a == b)
+    return "";
+  if (a < 0)
+    a = 0;
+  if (b > static_cast<int>(m_urlText.size()))
+    b = static_cast<int>(m_urlText.size());
   return m_urlText.substr(a, b - a);
 }
 
 void Browser::urlBarDeleteSelection() {
-  if (m_urlSelAnchor < 0 || m_urlSelFocus < 0) return;
+  if (m_urlSelAnchor < 0 || m_urlSelFocus < 0)
+    return;
   int a = std::min(m_urlSelAnchor, m_urlSelFocus);
   int b = std::max(m_urlSelAnchor, m_urlSelFocus);
-  if (a == b) return;
-  if (a < 0) a = 0;
-  if (b > static_cast<int>(m_urlText.size())) b = static_cast<int>(m_urlText.size());
+  if (a == b)
+    return;
+  if (a < 0)
+    a = 0;
+  if (b > static_cast<int>(m_urlText.size()))
+    b = static_cast<int>(m_urlText.size());
   m_urlText.erase(a, b - a);
   m_cursorPos = a;
   m_urlSelAnchor = -1;
@@ -2569,7 +2829,8 @@ void Browser::urlBarDeleteSelection() {
 void Browser::handlePaste(const std::string &text) {
   // Replace selection or insert at cursor
   urlBarDeleteSelection();
-  if (m_cursorPos > m_urlText.size()) m_cursorPos = m_urlText.size();
+  if (m_cursorPos > m_urlText.size())
+    m_cursorPos = m_urlText.size();
   m_urlText.insert(m_cursorPos, text);
   m_cursorPos += text.size();
 }

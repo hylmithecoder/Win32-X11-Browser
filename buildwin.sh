@@ -1,1 +1,1 @@
-nix-shell --arg cross true --run "build-windows"
+NIXPKGS_ALLOW_BROKEN=1 nix-shell --arg cross true --run "build-windows"
