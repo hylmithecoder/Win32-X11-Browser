@@ -1286,7 +1286,11 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     return el ? el.text() : "";
   };
 
-  Js::JsEngine engine(dom);
+  // m_jsEngine (not a local) so the page's listeners, timers, and Promise
+  // state stay alive after loadHtml returns -- handleClick/render trigger and
+  // pump it later. Replacing the old page's engine here (if any) matches real
+  // browsers discarding the previous document's JS context on navigation.
+  m_jsEngine = std::make_unique<Js::JsEngine>(dom);
   for (const Wrapper::Node &script : m_doc.getElementsByTagName("script")) {
     // Skip non-JavaScript scripts (e.g. application/json, importmap).
     std::string type = ToLower(script.attribute("type"));
@@ -1304,13 +1308,13 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
         std::string js(data.begin(), data.end());
         DEBUG_LOG("[JS] Loaded external script: %s (%zu bytes)", abs.c_str(),
                   js.size());
-        engine.execute(js);
+        m_jsEngine->execute(js);
       } else {
         DEBUG_LOGF("[JS] Failed to load external script: %s", LogLevel::CRASH,
                    abs.c_str());
       }
     } else {
-      engine.execute(script.text());
+      m_jsEngine->execute(script.text());
     }
   }
 
@@ -1700,6 +1704,16 @@ Paint::Canvas Browser::render(int width, int height) {
   m_lastWidth = width;
   m_lastHeight = height;
 
+  // Fire any due setTimeout/setInterval callbacks (and drain the Promise
+  // microtask queue after each) before laying out/painting this frame, so a
+  // timer-driven DOM mutation shows up in the same frame it becomes due.
+  if (m_jsEngine) {
+    double elapsedMs = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - m_startTime)
+                           .count();
+    m_jsEngine->pump(elapsedMs);
+  }
+
   Paint::Canvas canvas(width, height);
   canvas.clear(kWhite);
 
@@ -2060,9 +2074,36 @@ bool Browser::handleClick(int x, int y) {
       default:
         break;
       }
+
+      // Fire a generic "click" listener on the nearest id-bearing ancestor
+      // (mirrors the id-based dispatch used for audio controls below). Unlike
+      // the cases above, this does not return early: a real browser fires
+      // the event and then still performs the element's default action
+      // (link navigation, etc.), so execution falls through.
+      if (m_jsEngine) {
+        std::string clickId;
+        for (Wrapper::Node walk = targetEl; walk; walk = walk.parent()) {
+          if (walk.isElement()) {
+            clickId = walk.attribute("id");
+            if (!clickId.empty()) {
+              break;
+            }
+          }
+        }
+        if (!clickId.empty()) {
+          m_jsEngine->triggerEvent("click", clickId);
+          restyle();
+        }
+      }
     }
 
-    Wrapper::Node n = found->node->node;
+    // Reuse targetEl (captured before any of the handling above), not
+    // found->node->node: a click listener dispatched just above can run
+    // arbitrary JS that mutates the DOM and rebuilds m_style (e.g. via
+    // setElementText), which frees the StyledNode/LayoutBox tree `found`
+    // points into. targetEl is a plain xmlNode* copy into m_doc itself, which
+    // that rebuild never touches, so it stays valid either way.
+    Wrapper::Node n = targetEl;
     while (n) {
       if (n.isElement() && ToLower(n.name()) == "a") {
         std::string href = n.attribute("href");

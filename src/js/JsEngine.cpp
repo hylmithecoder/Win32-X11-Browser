@@ -1,5 +1,6 @@
 #include "JsEngine.hpp"
 #include "Debugger.hpp"
+#include "Variabel.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -148,6 +149,8 @@ struct Token {
     KeywordTypeof,
     KeywordBreak,
     KeywordContinue,
+    KeywordAsync,
+    KeywordAwait,
     Assign,         // =
     PlusAssign,     // +=
     MinusAssign,    // -=
@@ -307,6 +310,10 @@ static std::vector<Token> tokenize(const std::string &code) {
         kw = Token::Type::KeywordBreak;
       else if (id == "continue")
         kw = Token::Type::KeywordContinue;
+      else if (id == "async")
+        kw = Token::Type::KeywordAsync;
+      else if (id == "await")
+        kw = Token::Type::KeywordAwait;
       tokens.push_back({kw, id});
       continue;
     }
@@ -462,46 +469,8 @@ static std::vector<Token> tokenize(const std::string &code) {
 
 // ---------------------------------------------------------------------------
 // Control-flow signals (propagated as exceptions through the tree walker)
+// -- now defined in JsEngine.hpp
 // ---------------------------------------------------------------------------
-struct ReturnSignal {
-  JsValue value;
-};
-struct BreakSignal {};
-struct ContinueSignal {};
-
-static bool truthy(const JsValue &v) {
-  switch (v.type) {
-  case ValueType::Boolean:
-    return v.boolVal;
-  case ValueType::Number:
-    return v.numberVal != 0 && !std::isnan(v.numberVal);
-  case ValueType::String:
-    return !v.stringVal.empty();
-  case ValueType::Object:
-    return v.objVal != nullptr || static_cast<bool>(v.callback);
-  default:
-    return false;
-  }
-}
-
-static double toNum(const JsValue &v) {
-  if (v.type == ValueType::Number)
-    return v.numberVal;
-  if (v.type == ValueType::Boolean)
-    return v.boolVal ? 1.0 : 0.0;
-  if (v.type == ValueType::String) {
-    if (v.stringVal.empty())
-      return 0.0;
-    try {
-      size_t pos = 0;
-      double d = std::stod(v.stringVal, &pos);
-      return d;
-    } catch (...) {
-      return std::nan("");
-    }
-  }
-  return std::nan("");
-}
 
 static bool looseEquals(const JsValue &a, const JsValue &b) {
   if (a.type == ValueType::String && b.type == ValueType::String)
@@ -536,11 +505,12 @@ class Parser {
   size_t index = 0;
   std::shared_ptr<JsEnvironment> env;
   DomInterface dom;
+  JsEngine *engine; // Promise/timer access for `await` and async functions
 
 public:
   Parser(const std::vector<Token> &t, std::shared_ptr<JsEnvironment> e,
-         DomInterface d)
-      : tokens(t), env(e), dom(d) {}
+         DomInterface d, JsEngine *eng)
+      : tokens(t), env(e), dom(d), engine(eng) {}
 
   Token peek(size_t ahead = 0) {
     size_t k = index + ahead;
@@ -622,12 +592,19 @@ public:
   }
 
   // Build a callable JsValue from parameter names and a captured body. The
-  // closure runs the body in a child environment when invoked.
+  // closure runs the body in a child environment when invoked. When `isAsync`
+  // is set, the function always returns a Promise instead of a raw value: the
+  // body still runs synchronously (this interpreter has no coroutines to
+  // truly suspend it), but a plain `return` fulfils the promise and a
+  // RejectSignal escaping from an `await` inside the body (see doAwait)
+  // rejects it, instead of either value unwinding further up the C++ stack.
   JsValue makeFunction(std::vector<std::string> params,
                        std::shared_ptr<std::vector<Token>> body,
-                       std::shared_ptr<JsEnvironment> defEnv, DomInterface d) {
+                       std::shared_ptr<JsEnvironment> defEnv, DomInterface d,
+                       JsEngine *eng, bool isAsync) {
     return JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-        [params, body, defEnv, d](const std::vector<JsValue> &args) -> JsValue {
+        [params, body, defEnv, d, eng,
+         isAsync](const std::vector<JsValue> &args) -> JsValue {
           auto local = std::make_shared<JsEnvironment>(defEnv);
           for (size_t k = 0; k < params.size(); ++k) {
             local->set(params[k], k < args.size() ? args[k] : JsValue());
@@ -636,13 +613,28 @@ public:
           argsArr.objVal->isArray = true;
           argsArr.objVal->elements = args;
           local->set("arguments", argsArr);
-          Parser p(*body, local, d);
+          Parser p(*body, local, d, eng);
+          if (!isAsync) {
+            try {
+              p.parseProgram();
+            } catch (ReturnSignal &r) {
+              return r.value;
+            }
+            return JsValue();
+          }
+          JsValue promise = eng->makePromise();
           try {
             p.parseProgram();
+            eng->resolvePromiseObj(promise.objVal, JsValue()); // fell off the
+                                                               // end: undefined
           } catch (ReturnSignal &r) {
-            return r.value;
+            // If r.value is itself a promise/thenable, resolvePromiseObj
+            // adopts its eventual state instead of nesting Promise<Promise>.
+            eng->resolvePromiseObj(promise.objVal, r.value);
+          } catch (RejectSignal &r) {
+            eng->rejectPromiseObj(promise.objVal, r.value);
           }
-          return JsValue();
+          return promise;
         }));
   }
 
@@ -672,6 +664,10 @@ public:
       } catch (BreakSignal &) {
         throw;
       } catch (ContinueSignal &) {
+        throw;
+      } catch (RejectSignal &) {
+        // An awaited rejection aborts the rest of this (async) function body
+        // rather than being treated as a recoverable per-statement error.
         throw;
       } catch (const std::exception &) {
         // Error recovery: skip to the next statement boundary so a single bad
@@ -707,7 +703,7 @@ public:
   // Execute a captured token range as a (sub) program sharing `e` as scope.
   void runTokens(const std::vector<Token> &t,
                  std::shared_ptr<JsEnvironment> e) {
-    Parser p(t, e, dom);
+    Parser p(t, e, dom, engine);
     p.parseProgram();
   }
 
@@ -747,6 +743,12 @@ public:
       parseFunctionDeclaration();
       return;
     }
+    if (t == Token::Type::KeywordAsync &&
+        peek(1).type == Token::Type::KeywordFunction) {
+      advance(); // async
+      parseFunctionDeclaration(true);
+      return;
+    }
     if (t == Token::Type::KeywordIf) {
       parseIf();
       return;
@@ -784,7 +786,7 @@ public:
     match(Token::Type::Semi);
   }
 
-  void parseFunctionDeclaration() {
+  void parseFunctionDeclaration(bool isAsync = false) {
     advance(); // function
     std::string name;
     if (check(Token::Type::Identifier)) {
@@ -792,7 +794,7 @@ public:
     }
     std::vector<std::string> params = parseParamList();
     auto body = std::make_shared<std::vector<Token>>(collectBlock());
-    JsValue fn = makeFunction(params, body, env, dom);
+    JsValue fn = makeFunction(params, body, env, dom, engine, isAsync);
     if (!name.empty()) {
       env->set(name, fn);
     }
@@ -858,7 +860,7 @@ public:
     std::vector<Token> body = captureStatementOrBlock();
     int guard = 0;
     while (guard++ < 1000000) {
-      Parser cp(condTokens, env, dom);
+      Parser cp(condTokens, env, dom, engine);
       if (!truthy(cp.parseExpression()))
         break;
       try {
@@ -889,7 +891,7 @@ public:
     while (guard++ < 1000000) {
       bool hasCond = condTokens.size() > 1; // more than just Eof
       if (hasCond) {
-        Parser cp(condTokens, loopEnv, dom);
+        Parser cp(condTokens, loopEnv, dom, engine);
         if (!truthy(cp.parseExpression()))
           break;
       }
@@ -1009,9 +1011,9 @@ public:
       idxTokens.push_back({Token::Type::Eof, ""});
       objTokens.push_back({Token::Type::Eof, ""});
 
-      Parser op1(objTokens, env, dom);
+      Parser op1(objTokens, env, dom, engine);
       JsValue obj = op1.parseExpression();
-      Parser ip(idxTokens, env, dom);
+      Parser ip(idxTokens, env, dom, engine);
       JsValue idx = ip.parseExpression();
       if (obj.objVal) {
         if (obj.objVal->isArray && idx.type == ValueType::Number) {
@@ -1033,7 +1035,7 @@ public:
     std::string propName =
         (lastDot + 1 < (int)lhs.size()) ? lhs[lastDot + 1].value : "";
 
-    Parser parentParser(parentTokens, env, dom);
+    Parser parentParser(parentTokens, env, dom, engine);
     JsValue parentObj = parentParser.parseExpression();
 
     JsValue newVal = applyOp(parentObj.getProperty(propName));
@@ -1204,6 +1206,31 @@ public:
     return left;
   }
 
+  // Evaluate `await v`. Per spec, awaiting a non-promise just yields the
+  // value unchanged. Awaiting a promise fast-forwards the engine's virtual
+  // clock -- draining microtasks and running due timers one step at a time
+  // via advanceOneStep() -- until it settles; this interpreter has no
+  // coroutines to truly suspend execution and resume later, so "waiting"
+  // means synchronously running exactly the async work needed to reach a
+  // result, nothing more. A rejection unwinds as a RejectSignal, caught by
+  // the nearest async-function wrapper (see makeFunction) or, if none, by
+  // JsEngine::execute's top-level catch-all.
+  JsValue doAwait(JsValue v) {
+    if (!(v.objVal && v.objVal->isPromise)) {
+      return v;
+    }
+    int guard = 0;
+    while (v.objVal->promiseState == 0 && guard++ < 1000000) {
+      if (!engine->advanceOneStep()) {
+        break; // nothing left could ever settle this promise
+      }
+    }
+    if (v.objVal->promiseState == 2) {
+      throw RejectSignal{v.objVal->promiseResult};
+    }
+    return v.objVal->promiseResult; // fulfilled, or still pending -> undefined
+  }
+
   JsValue parseUnary() {
     if (check(Token::Type::Not)) {
       advance();
@@ -1232,6 +1259,10 @@ public:
       default:
         return JsValue(std::string("undefined"));
       }
+    }
+    if (check(Token::Type::KeywordAwait)) {
+      advance();
+      return doAwait(parseUnary());
     }
     // prefix ++/-- on a bare identifier
     if (check(Token::Type::Inc) || check(Token::Type::Dec)) {
@@ -1513,7 +1544,33 @@ public:
         advance(); // optional name
       std::vector<std::string> params = parseParamList();
       auto body = std::make_shared<std::vector<Token>>(collectBlock());
-      return makeFunction(params, body, env, dom);
+      return makeFunction(params, body, env, dom, engine, false);
+    }
+    // async function(...){...}  |  async (params) => ...  |  async x => ...
+    if (check(Token::Type::KeywordAsync)) {
+      size_t save = index;
+      advance(); // async
+      if (match(Token::Type::KeywordFunction)) {
+        if (check(Token::Type::Identifier))
+          advance(); // optional name
+        std::vector<std::string> params = parseParamList();
+        auto body = std::make_shared<std::vector<Token>>(collectBlock());
+        return makeFunction(params, body, env, dom, engine, true);
+      }
+      if (check(Token::Type::Identifier) &&
+          peek(1).type == Token::Type::Arrow) {
+        std::vector<std::string> params{advance().value};
+        advance(); // =>
+        return parseArrowBody(params, true);
+      }
+      if (check(Token::Type::LParen) && isArrowAhead()) {
+        std::vector<std::string> params = parseParamList();
+        consume(Token::Type::Arrow, "Expected '=>'");
+        return parseArrowBody(params, true);
+      }
+      // Not actually `async function`/`async (...)=>` syntax (e.g. `async`
+      // used as a plain identifier) -- back off and fall through as usual.
+      index = save;
     }
     // Arrow function: ident => ...   OR   ( ... ) => ...
     if (check(Token::Type::Identifier) && peek(1).type == Token::Type::Arrow) {
@@ -1562,10 +1619,11 @@ public:
     return false;
   }
 
-  JsValue parseArrowBody(std::vector<std::string> params) {
+  JsValue parseArrowBody(std::vector<std::string> params,
+                         bool isAsync = false) {
     if (check(Token::Type::LBrace)) {
       auto body = std::make_shared<std::vector<Token>>(collectBlock());
-      return makeFunction(params, body, env, dom);
+      return makeFunction(params, body, env, dom, engine, isAsync);
     }
     // Expression body: wrap as `return <expr>;`
     std::vector<Token> exprTokens = collectUntilExprEnd();
@@ -1576,7 +1634,7 @@ public:
         body->push_back(tk);
     body->push_back({Token::Type::Semi, ";"});
     body->push_back({Token::Type::Eof, ""});
-    return makeFunction(params, body, env, dom);
+    return makeFunction(params, body, env, dom, engine, isAsync);
   }
 
   // Collect tokens for a single expression (used by arrow expression bodies),
@@ -1615,230 +1673,239 @@ public:
 // ---------------------------------------------------------------------------
 JsEngine::JsEngine(DomInterface dom) : m_dom(dom) {
   m_globalEnv = std::make_shared<JsEnvironment>();
+  initBuiltins();
+}
 
-  // console.log / warn / error / info
-  JsValue consoleObj(ValueType::Object);
-  auto logger = [](const std::vector<JsValue> &args) {
-    for (size_t i = 0; i < args.size(); ++i) {
-      std::cout << args[i].toString() << (i + 1 < args.size() ? " " : "");
-    }
-    std::cout << std::endl;
-    return JsValue();
-  };
-  consoleObj.setProperty(
-      "log",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
-  consoleObj.setProperty(
-      "warn",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
-  consoleObj.setProperty(
-      "error",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
-  consoleObj.setProperty(
-      "info",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
-  m_globalEnv->set("console", consoleObj);
+// ---------------------------------------------------------------------------
+// Async support: Promise primitives, timers, microtask/macrotask pumping
+// ---------------------------------------------------------------------------
 
-  // Math
-  JsValue mathObj(ValueType::Object);
-  mathObj.setProperty("PI", JsValue(3.141592653589793));
-  mathObj.setProperty(
-      "floor", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                   [](const std::vector<JsValue> &a) {
-                     return JsValue(std::floor(a.empty() ? 0 : a[0].numberVal));
-                   })));
-  mathObj.setProperty(
-      "ceil", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                  [](const std::vector<JsValue> &a) {
-                    return JsValue(std::ceil(a.empty() ? 0 : a[0].numberVal));
+JsValue JsEngine::makePromise() {
+  JsValue p(ValueType::Object);
+  p.objVal->isPromise = true;
+  auto obj = p.objVal;
+  JsEngine *eng = this;
+  p.setProperty(
+      "then", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                  [obj, eng](const std::vector<JsValue> &args) {
+                    JsValue onFulfilled = args.size() > 0 ? args[0] : JsValue();
+                    JsValue onRejected = args.size() > 1 ? args[1] : JsValue();
+                    return eng->promiseThen(obj, onFulfilled, onRejected);
                   })));
-  mathObj.setProperty(
-      "round", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                   [](const std::vector<JsValue> &a) {
-                     return JsValue(std::round(a.empty() ? 0 : a[0].numberVal));
-                   })));
-  mathObj.setProperty(
-      "abs", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                 [](const std::vector<JsValue> &a) {
-                   return JsValue(std::fabs(a.empty() ? 0 : a[0].numberVal));
-                 })));
-  mathObj.setProperty(
-      "max", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                 [](const std::vector<JsValue> &a) {
-                   double m = -INFINITY;
-                   for (auto &v : a)
-                     m = std::max(m, v.numberVal);
-                   return JsValue(m);
-                 })));
-  mathObj.setProperty(
-      "min", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                 [](const std::vector<JsValue> &a) {
-                   double m = INFINITY;
-                   for (auto &v : a)
-                     m = std::min(m, v.numberVal);
-                   return JsValue(m);
-                 })));
-  mathObj.setProperty(
-      "random", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                    [](const std::vector<JsValue> &) {
-                      return JsValue((double)rand() / RAND_MAX);
+  p.setProperty("catch",
+                JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                    [obj, eng](const std::vector<JsValue> &args) {
+                      JsValue onRejected = args.empty() ? JsValue() : args[0];
+                      return eng->promiseThen(obj, JsValue(), onRejected);
                     })));
-  mathObj.setProperty(
-      "sqrt", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                  [](const std::vector<JsValue> &a) {
-                    return JsValue(std::sqrt(a.empty() ? 0 : a[0].numberVal));
-                  })));
-  m_globalEnv->set("Math", mathObj);
-
-  // parseInt / parseFloat / String / Number / Boolean / isNaN
-  m_globalEnv->set("parseInt",
-                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                       [](const std::vector<JsValue> &a) {
-                         if (a.empty())
-                           return JsValue(std::nan(""));
-                         try {
-                           return JsValue((double)std::stoll(a[0].toString()));
-                         } catch (...) {
-                           return JsValue(std::nan(""));
-                         }
-                       })));
-  m_globalEnv->set("parseFloat",
-                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                       [](const std::vector<JsValue> &a) {
-                         if (a.empty())
-                           return JsValue(std::nan(""));
-                         try {
-                           return JsValue(std::stod(a[0].toString()));
-                         } catch (...) {
-                           return JsValue(std::nan(""));
-                         }
-                       })));
-  m_globalEnv->set("String",
-                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                       [](const std::vector<JsValue> &a) {
-                         return JsValue(a.empty() ? std::string()
-                                                  : a[0].toString());
-                       })));
-  m_globalEnv->set("Number",
-                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                       [](const std::vector<JsValue> &a) {
-                         return JsValue(a.empty() ? 0.0 : toNum(a[0]));
-                       })));
-  m_globalEnv->set("Boolean",
-                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                       [](const std::vector<JsValue> &a) {
-                         return JsValue(!a.empty() && truthy(a[0]));
-                       })));
-  m_globalEnv->set("isNaN",
-                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                       [](const std::vector<JsValue> &a) {
-                         return JsValue(a.empty() || std::isnan(toNum(a[0])));
-                       })));
-
-  // Setup document
-  JsValue documentObj(ValueType::Object);
-  documentObj.isDocument = true;
-
-  documentObj.setProperty(
-      "getElementById",
+  p.setProperty(
+      "finally",
       JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this](const std::vector<JsValue> &args) {
-            if (args.empty())
-              return JsValue();
-            return getOrElement(args[0].toString());
+          [obj, eng](const std::vector<JsValue> &args) {
+            JsValue onFinally = args.empty() ? JsValue() : args[0];
+            // Run onFinally regardless of outcome, then pass the original
+            // value through (or re-reject with the original reason).
+            JsValue passFulfill(
+                std::function<JsValue(const std::vector<JsValue> &)>(
+                    [onFinally](const std::vector<JsValue> &a) {
+                      if (onFinally.callback) {
+                        onFinally.callback({});
+                      }
+                      return a.empty() ? JsValue() : a[0];
+                    }));
+            JsValue passReject(
+                std::function<JsValue(const std::vector<JsValue> &)>(
+                    [onFinally](const std::vector<JsValue> &a) -> JsValue {
+                      if (onFinally.callback) {
+                        onFinally.callback({});
+                      }
+                      throw RejectSignal{a.empty() ? JsValue() : a[0]};
+                    }));
+            return eng->promiseThen(obj, passFulfill, passReject);
           })));
+  return p;
+}
 
-  auto querySelectorAllFn =
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this, dom](const std::vector<JsValue> &args) {
-            JsValue arr(ValueType::Object);
-            arr.objVal->isArray = true;
-            if (!args.empty() && dom.querySelectorAll) {
-              std::string sel = args[0].toString();
-              std::vector<std::string> ids = dom.querySelectorAll(sel);
-              for (const std::string &id : ids) {
-                arr.objVal->elements.push_back(getOrElement(id));
-              }
-            }
-            arr.setProperty("length", JsValue(static_cast<double>(
-                                          arr.objVal->elements.size())));
-            return arr;
-          }));
-  documentObj.setProperty("querySelectorAll", querySelectorAllFn);
+void JsEngine::resolvePromiseObj(std::shared_ptr<JsObject> obj, JsValue value) {
+  if (!obj || obj->promiseState != 0) {
+    return; // already settled (or resolved more than once): ignore
+  }
+  // Resolving with another promise/thenable adopts its eventual state instead
+  // of nesting Promise<Promise<T>>.
+  if (value.objVal && value.objVal->isPromise) {
+    auto inner = value.objVal;
+    JsEngine *eng = this;
+    auto adopt = [inner, obj, eng]() {
+      if (inner->promiseState == 1) {
+        eng->resolvePromiseObj(obj, inner->promiseResult);
+      } else {
+        eng->rejectPromiseObj(obj, inner->promiseResult);
+      }
+    };
+    if (inner->promiseState != 0) {
+      enqueueMicrotask(adopt);
+    } else {
+      inner->onSettled.push_back(adopt);
+    }
+    return;
+  }
+  obj->promiseState = 1;
+  obj->promiseResult = value;
+  std::vector<std::function<void()>> callbacks;
+  callbacks.swap(obj->onSettled);
+  for (auto &cb : callbacks) {
+    enqueueMicrotask(cb);
+  }
+}
 
-  auto querySelectorFn =
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this, dom](const std::vector<JsValue> &args) {
-            if (!args.empty() && dom.querySelectorAll) {
-              std::string sel = args[0].toString();
-              std::vector<std::string> ids = dom.querySelectorAll(sel);
-              if (!ids.empty()) {
-                return getOrElement(ids[0]);
-              }
-            }
-            return JsValue();
-          }));
-  documentObj.setProperty("querySelector", querySelectorFn);
+void JsEngine::rejectPromiseObj(std::shared_ptr<JsObject> obj, JsValue reason) {
+  if (!obj || obj->promiseState != 0) {
+    return;
+  }
+  obj->promiseState = 2;
+  obj->promiseResult = reason;
+  std::vector<std::function<void()>> callbacks;
+  callbacks.swap(obj->onSettled);
+  for (auto &cb : callbacks) {
+    enqueueMicrotask(cb);
+  }
+}
 
-  auto stubElement =
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this](const std::vector<JsValue> &) { return JsValue(); }));
-  documentObj.setProperty("createElement", stubElement);
-  documentObj.setProperty(
-      "addEventListener",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [docObj = documentObj.objVal](const std::vector<JsValue> &args) {
-            if (args.size() >= 2) {
-              std::string eventType = args[0].toString();
-              JsValue callback = args[1];
-              if (docObj) {
-                docObj->properties["_listener_" + eventType] = callback;
-              }
-            }
-            return JsValue();
-          })));
-  documentObj.setProperty(
-      "write", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                   [](const std::vector<JsValue> &a) {
-                     for (auto &v : a)
-                       std::cout << v.toString();
-                     return JsValue();
-                   })));
-  m_globalEnv->set("document", documentObj);
+JsValue JsEngine::promiseThen(std::shared_ptr<JsObject> obj,
+                              JsValue onFulfilled, JsValue onRejected) {
+  JsValue derived = makePromise();
+  auto derivedObj = derived.objVal;
+  JsEngine *eng = this;
+  auto settle = [obj, onFulfilled, onRejected, derivedObj, eng]() {
+    bool fulfilled = obj->promiseState == 1;
+    JsValue handler = fulfilled ? onFulfilled : onRejected;
+    JsValue result = obj->promiseResult;
+    if (handler.callback) {
+      try {
+        JsValue r = handler.callback({result});
+        eng->resolvePromiseObj(derivedObj, r);
+      } catch (RejectSignal &rs) {
+        eng->rejectPromiseObj(derivedObj, rs.value);
+      }
+    } else if (fulfilled) {
+      eng->resolvePromiseObj(derivedObj, result);
+    } else {
+      // No rejection handler: propagate the rejection to the derived
+      // promise unchanged (as real Promise chains do).
+      eng->rejectPromiseObj(derivedObj, result);
+    }
+  };
+  if (obj->promiseState != 0) {
+    enqueueMicrotask(settle);
+  } else {
+    obj->onSettled.push_back(settle);
+  }
+  return derived;
+}
 
-  // window aliases to the global scope; a couple of no-op timers.
-  JsValue windowObj(ValueType::Object);
-  windowObj.setProperty(
-      "addEventListener",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [](const std::vector<JsValue> &) { return JsValue(); })));
-  windowObj.setProperty(
-      "alert", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                   [](const std::vector<JsValue> &a) {
-                     MSGBOX_INFO("alert", (a.empty() ? "" : a[0].toString()));
-                     return JsValue();
-                   })));
-  m_globalEnv->set("window", windowObj);
-  m_globalEnv->set("alert", windowObj.getProperty("alert"));
-  m_globalEnv->set(
-      "setTimeout",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [](const std::vector<JsValue> &) { return JsValue(); })));
-  m_globalEnv->set(
-      "setInterval",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [](const std::vector<JsValue> &) { return JsValue(); })));
+void JsEngine::enqueueMicrotask(std::function<void()> task) {
+  m_microtasks.push_back(std::move(task));
+}
+
+void JsEngine::drainMicrotasks() {
+  // A microtask can enqueue more microtasks (chained .then()); drain until
+  // empty, per spec ordering (all microtasks run before the next macrotask).
+  while (!m_microtasks.empty()) {
+    std::function<void()> task = m_microtasks.front();
+    m_microtasks.erase(m_microtasks.begin());
+    task();
+  }
+}
+
+void JsEngine::pump(double nowMs) {
+  m_virtualNowMs = std::max(m_virtualNowMs, nowMs);
+  // Run every timer due by now, earliest first; interval timers are
+  // rescheduled rather than removed. A callback that itself schedules a
+  // due-by-now timer (e.g. setTimeout(fn, 0)) is picked up in the same pump.
+  bool ranOne = true;
+  while (ranOne) {
+    ranOne = false;
+    size_t earliest = m_timers.size();
+    double earliestDue = 0;
+    for (size_t i = 0; i < m_timers.size(); ++i) {
+      if (m_timers[i].cancelled || m_timers[i].dueMs > m_virtualNowMs) {
+        continue;
+      }
+      if (earliest == m_timers.size() || m_timers[i].dueMs < earliestDue) {
+        earliest = i;
+        earliestDue = m_timers[i].dueMs;
+      }
+    }
+    if (earliest == m_timers.size()) {
+      break;
+    }
+    Timer &t = m_timers[earliest];
+    if (t.repeating) {
+      t.dueMs += t.intervalMs > 0 ? t.intervalMs : 1.0;
+    } else {
+      t.cancelled = true; // one-shot: consumed
+    }
+    if (t.callback.callback) {
+      t.callback.callback(t.args);
+    }
+    drainMicrotasks();
+    ranOne = true;
+  }
+  // Garbage-collect consumed one-shot/cancelled timers so a long-lived page
+  // doesn't grow this vector without bound.
+  m_timers.erase(std::remove_if(m_timers.begin(), m_timers.end(),
+                                [](const Timer &t) { return t.cancelled; }),
+                 m_timers.end());
+}
+
+bool JsEngine::advanceOneStep() {
+  if (!m_microtasks.empty()) {
+    std::function<void()> task = m_microtasks.front();
+    m_microtasks.erase(m_microtasks.begin());
+    task();
+    return true;
+  }
+  size_t earliest = m_timers.size();
+  double earliestDue = 0;
+  for (size_t i = 0; i < m_timers.size(); ++i) {
+    if (m_timers[i].cancelled) {
+      continue;
+    }
+    if (earliest == m_timers.size() || m_timers[i].dueMs < earliestDue) {
+      earliest = i;
+      earliestDue = m_timers[i].dueMs;
+    }
+  }
+  if (earliest == m_timers.size()) {
+    return false; // nothing left that could ever settle the awaited promise
+  }
+  Timer &t = m_timers[earliest];
+  m_virtualNowMs = std::max(m_virtualNowMs, t.dueMs); // jump the clock to it
+  if (t.repeating) {
+    t.dueMs += t.intervalMs > 0 ? t.intervalMs : 1.0;
+  } else {
+    t.cancelled = true;
+  }
+  if (t.callback.callback) {
+    t.callback.callback(t.args);
+  }
+  return true;
 }
 
 void JsEngine::execute(const std::string &code) {
   try {
     std::vector<Token> tokens = tokenize(code);
-    Parser parser(tokens, m_globalEnv, m_dom);
+    Parser parser(tokens, m_globalEnv, m_dom, this);
     parser.parseProgram();
+    // Let any Promise chains kicked off synchronously during this script run
+    // as far as they can (their .then() reactions) before yielding, matching
+    // the JS event loop draining microtasks after every task.
+    drainMicrotasks();
   } catch (const std::exception &e) {
     std::cerr << "JS execution error: " << e.what() << std::endl;
   } catch (...) {
-    // swallow control-flow signals that escaped to top level
+    // swallow control-flow signals that escaped to top level (including an
+    // unhandled RejectSignal from a top-level `await` on a rejected promise)
   }
 }
 

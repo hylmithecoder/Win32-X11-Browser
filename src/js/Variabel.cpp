@@ -1,0 +1,430 @@
+#include "Variabel.hpp"
+#include "Debugger.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+
+using namespace Debug;
+
+namespace DesktopWebview {
+namespace Js {
+
+bool truthy(const JsValue &v) {
+  switch (v.type) {
+  case ValueType::Boolean:
+    return v.boolVal;
+  case ValueType::Number:
+    return v.numberVal != 0 && !std::isnan(v.numberVal);
+  case ValueType::String:
+    return !v.stringVal.empty();
+  case ValueType::Object:
+    return v.objVal != nullptr || static_cast<bool>(v.callback);
+  default:
+    return false;
+  }
+}
+
+double toNum(const JsValue &v) {
+  if (v.type == ValueType::Number)
+    return v.numberVal;
+  if (v.type == ValueType::Boolean)
+    return v.boolVal ? 1.0 : 0.0;
+  if (v.type == ValueType::String) {
+    if (v.stringVal.empty())
+      return 0.0;
+    try {
+      size_t pos = 0;
+      double d = std::stod(v.stringVal, &pos);
+      return d;
+    } catch (...) {
+      return std::nan("");
+    }
+  }
+  return std::nan("");
+}
+
+void JsEngine::initBuiltins() {
+  // console.log / warn / error / info
+  JsValue consoleObj(ValueType::Object);
+  auto logger = [](const std::vector<JsValue> &args) {
+    for (size_t i = 0; i < args.size(); ++i) {
+      std::cout << args[i].toString() << (i + 1 < args.size() ? " " : "");
+    }
+    std::cout << std::endl;
+    return JsValue();
+  };
+  consoleObj.setProperty(
+      "log",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
+  consoleObj.setProperty(
+      "warn",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
+  consoleObj.setProperty(
+      "error",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
+  consoleObj.setProperty(
+      "info",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(logger)));
+  m_globalEnv->set("console", consoleObj);
+
+  // Math
+  JsValue mathObj(ValueType::Object);
+  mathObj.setProperty("PI", JsValue(3.141592653589793));
+  mathObj.setProperty(
+      "floor", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                   [](const std::vector<JsValue> &a) {
+                     return JsValue(std::floor(a.empty() ? 0 : a[0].numberVal));
+                   })));
+  mathObj.setProperty(
+      "ceil", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                  [](const std::vector<JsValue> &a) {
+                    return JsValue(std::ceil(a.empty() ? 0 : a[0].numberVal));
+                  })));
+  mathObj.setProperty(
+      "round", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                   [](const std::vector<JsValue> &a) {
+                     return JsValue(std::round(a.empty() ? 0 : a[0].numberVal));
+                   })));
+  mathObj.setProperty(
+      "abs", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                 [](const std::vector<JsValue> &a) {
+                   return JsValue(std::fabs(a.empty() ? 0 : a[0].numberVal));
+                 })));
+  mathObj.setProperty(
+      "max", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                 [](const std::vector<JsValue> &a) {
+                   double m = -INFINITY;
+                   for (auto &v : a)
+                     m = std::max(m, v.numberVal);
+                   return JsValue(m);
+                 })));
+  mathObj.setProperty(
+      "min", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                 [](const std::vector<JsValue> &a) {
+                   double m = INFINITY;
+                   for (auto &v : a)
+                     m = std::min(m, v.numberVal);
+                   return JsValue(m);
+                 })));
+  mathObj.setProperty(
+      "random", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                    [](const std::vector<JsValue> &) {
+                      return JsValue((double)rand() / RAND_MAX);
+                    })));
+  mathObj.setProperty(
+      "sqrt", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                  [](const std::vector<JsValue> &a) {
+                    return JsValue(std::sqrt(a.empty() ? 0 : a[0].numberVal));
+                  })));
+  m_globalEnv->set("Math", mathObj);
+
+  // parseInt / parseFloat / String / Number / Boolean / isNaN
+  m_globalEnv->set("parseInt",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) {
+                         if (a.empty())
+                           return JsValue(std::nan(""));
+                         try {
+                           return JsValue((double)std::stoll(a[0].toString()));
+                         } catch (...) {
+                           return JsValue(std::nan(""));
+                         }
+                       })));
+  m_globalEnv->set("parseFloat",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) {
+                         if (a.empty())
+                           return JsValue(std::nan(""));
+                         try {
+                           return JsValue(std::stod(a[0].toString()));
+                         } catch (...) {
+                           return JsValue(std::nan(""));
+                         }
+                       })));
+  m_globalEnv->set("String",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) {
+                         return JsValue(a.empty() ? std::string()
+                                                  : a[0].toString());
+                       })));
+  m_globalEnv->set("Number",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) {
+                         return JsValue(a.empty() ? 0.0 : toNum(a[0]));
+                       })));
+  m_globalEnv->set("Boolean",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) {
+                         return JsValue(!a.empty() && truthy(a[0]));
+                       })));
+  m_globalEnv->set("isNaN",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) {
+                         return JsValue(a.empty() || std::isnan(toNum(a[0])));
+                       })));
+
+  // Setup document
+  JsValue documentObj(ValueType::Object);
+  documentObj.isDocument = true;
+
+  documentObj.setProperty(
+      "getElementById",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &args) {
+            if (args.empty())
+              return JsValue();
+            return getOrElement(args[0].toString());
+          })));
+
+  auto querySelectorAllFn =
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this, dom = m_dom](const std::vector<JsValue> &args) {
+            JsValue arr(ValueType::Object);
+            arr.objVal->isArray = true;
+            if (!args.empty() && dom.querySelectorAll) {
+              std::string sel = args[0].toString();
+              std::vector<std::string> ids = dom.querySelectorAll(sel);
+              for (const std::string &id : ids) {
+                arr.objVal->elements.push_back(getOrElement(id));
+              }
+            }
+            arr.setProperty("length", JsValue(static_cast<double>(
+                                          arr.objVal->elements.size())));
+            return arr;
+          }));
+  documentObj.setProperty("querySelectorAll", querySelectorAllFn);
+
+  auto querySelectorFn =
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this, dom = m_dom](const std::vector<JsValue> &args) {
+            if (!args.empty() && dom.querySelectorAll) {
+              std::string sel = args[0].toString();
+              std::vector<std::string> ids = dom.querySelectorAll(sel);
+              if (!ids.empty()) {
+                return getOrElement(ids[0]);
+              }
+            }
+            return JsValue();
+          }));
+  documentObj.setProperty("querySelector", querySelectorFn);
+
+  auto stubElement =
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &) { return JsValue(); }));
+  documentObj.setProperty("createElement", stubElement);
+  documentObj.setProperty(
+      "addEventListener",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [docObj = documentObj.objVal](const std::vector<JsValue> &args) {
+            if (args.size() >= 2) {
+              std::string eventType = args[0].toString();
+              JsValue callback = args[1];
+              if (docObj) {
+                docObj->properties["_listener_" + eventType] = callback;
+              }
+            }
+            return JsValue();
+          })));
+  documentObj.setProperty(
+      "write", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                   [](const std::vector<JsValue> &a) {
+                     for (auto &v : a)
+                       std::cout << v.toString();
+                     return JsValue();
+                   })));
+  m_globalEnv->set("document", documentObj);
+
+  // window aliases to the global scope; a couple of no-op timers.
+  JsValue windowObj(ValueType::Object);
+  windowObj.setProperty(
+      "addEventListener",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [](const std::vector<JsValue> &) { return JsValue(); })));
+  windowObj.setProperty(
+      "alert", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                   [](const std::vector<JsValue> &a) {
+                     MSGBOX_INFO("alert",
+                                 (a.empty() ? "" : a[0].toString()));
+                     return JsValue();
+                   })));
+  m_globalEnv->set("window", windowObj);
+  m_globalEnv->set("alert", windowObj.getProperty("alert"));
+
+  // setTimeout/setInterval schedule a real Timer, run later from pump() (the
+  // Browser calls pump() once per render tick); any arguments after the
+  // delay are forwarded to the callback, matching the DOM API.
+  m_globalEnv->set(
+      "setTimeout",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &a) -> JsValue {
+            if (a.empty() || !a[0].callback) {
+              return JsValue();
+            }
+            Timer t;
+            t.id = m_nextTimerId++;
+            t.dueMs = m_virtualNowMs + (a.size() > 1 ? toNum(a[1]) : 0.0);
+            t.callback = a[0];
+            if (a.size() > 2) {
+              t.args.assign(a.begin() + 2, a.end());
+            }
+            m_timers.push_back(t);
+            return JsValue(static_cast<double>(t.id));
+          })));
+  m_globalEnv->set(
+      "setInterval",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &a) -> JsValue {
+            if (a.empty() || !a[0].callback) {
+              return JsValue();
+            }
+            Timer t;
+            t.id = m_nextTimerId++;
+            t.intervalMs = a.size() > 1 ? std::max(0.0, toNum(a[1])) : 0.0;
+            t.dueMs = m_virtualNowMs + t.intervalMs;
+            t.repeating = true;
+            t.callback = a[0];
+            if (a.size() > 2) {
+              t.args.assign(a.begin() + 2, a.end());
+            }
+            m_timers.push_back(t);
+            return JsValue(static_cast<double>(t.id));
+          })));
+  m_globalEnv->set(
+      "clearTimeout",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &a) -> JsValue {
+            if (!a.empty()) {
+              int id = static_cast<int>(toNum(a[0]));
+              for (Timer &t : m_timers) {
+                if (t.id == id) {
+                  t.cancelled = true;
+                }
+              }
+            }
+            return JsValue();
+          })));
+  // Intervals share the same id space/vector as timeouts, so cancellation is
+  // identical either way.
+  m_globalEnv->set("clearInterval", m_globalEnv->get("clearTimeout"));
+
+  // Minimal Date: just the .now() static most timing code actually needs.
+  JsValue dateObj(ValueType::Object);
+  dateObj.setProperty(
+      "now", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                 [this](const std::vector<JsValue> &) {
+                   return JsValue(m_virtualNowMs);
+                 })));
+  m_globalEnv->set("Date", dateObj);
+
+  // ---- Promise --------------------------------------------------------
+  JsValue promiseGlobal(
+      std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &a) -> JsValue {
+            JsValue p = makePromise();
+            if (!a.empty() && a[0].callback) {
+              auto obj = p.objVal;
+              JsEngine *eng = this;
+              JsValue resolveFn(
+                  std::function<JsValue(const std::vector<JsValue> &)>(
+                      [obj, eng](const std::vector<JsValue> &ra) {
+                        eng->resolvePromiseObj(
+                            obj, ra.empty() ? JsValue() : ra[0]);
+                        return JsValue();
+                      }));
+              JsValue rejectFn(
+                  std::function<JsValue(const std::vector<JsValue> &)>(
+                      [obj, eng](const std::vector<JsValue> &ra) {
+                        eng->rejectPromiseObj(
+                            obj, ra.empty() ? JsValue() : ra[0]);
+                        return JsValue();
+                      }));
+              try {
+                a[0].callback({resolveFn, rejectFn});
+              } catch (RejectSignal &rs) {
+                rejectPromiseObj(obj, rs.value);
+              }
+            }
+            return p;
+          }));
+  promiseGlobal.setProperty(
+      "resolve", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                     [this](const std::vector<JsValue> &a) {
+                       JsValue v = a.empty() ? JsValue() : a[0];
+                       if (v.objVal && v.objVal->isPromise) {
+                         return v;
+                       }
+                       JsValue p = makePromise();
+                       resolvePromiseObj(p.objVal, v);
+                       return p;
+                     })));
+  promiseGlobal.setProperty(
+      "reject", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                    [this](const std::vector<JsValue> &a) {
+                      JsValue p = makePromise();
+                      rejectPromiseObj(p.objVal,
+                                       a.empty() ? JsValue() : a[0]);
+                      return p;
+                    })));
+  promiseGlobal.setProperty(
+      "all", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                 [this](const std::vector<JsValue> &a) -> JsValue {
+                   JsValue result = makePromise();
+                   JsValue arr = a.empty() ? JsValue() : a[0];
+                   if (!arr.objVal || !arr.objVal->isArray ||
+                       arr.objVal->elements.empty()) {
+                     JsValue empty(ValueType::Object);
+                     empty.objVal->isArray = true;
+                     resolvePromiseObj(result.objVal, empty);
+                     return result;
+                   }
+                   size_t n = arr.objVal->elements.size();
+                   auto remaining =
+                       std::make_shared<int>(static_cast<int>(n));
+                   auto results =
+                       std::make_shared<std::vector<JsValue>>(n);
+                   auto resultObj = result.objVal;
+                   JsEngine *eng = this;
+                   auto settleOne = [remaining, results, resultObj,
+                                     eng](size_t idx, JsValue v) {
+                     (*results)[idx] = v;
+                     if (--(*remaining) == 0) {
+                       JsValue arrOut(ValueType::Object);
+                       arrOut.objVal->isArray = true;
+                       arrOut.objVal->elements = *results;
+                       eng->resolvePromiseObj(resultObj, arrOut);
+                     }
+                   };
+                   for (size_t idx = 0; idx < n; ++idx) {
+                     JsValue item = arr.objVal->elements[idx];
+                     if (item.objVal && item.objVal->isPromise) {
+                       promiseThen(
+                           item.objVal,
+                           JsValue(std::function<JsValue(
+                                       const std::vector<JsValue> &)>(
+                               [idx, settleOne](
+                                   const std::vector<JsValue> &v) {
+                                 settleOne(idx,
+                                           v.empty() ? JsValue() : v[0]);
+                                 return JsValue();
+                               })),
+                           JsValue(std::function<JsValue(
+                                       const std::vector<JsValue> &)>(
+                               [resultObj, eng](
+                                   const std::vector<JsValue> &v) {
+                                 eng->rejectPromiseObj(
+                                     resultObj,
+                                     v.empty() ? JsValue() : v[0]);
+                                 return JsValue();
+                               })));
+                     } else {
+                       settleOne(idx, item);
+                     }
+                   }
+                   return result;
+                 })));
+  m_globalEnv->set("Promise", promiseGlobal);
+}
+
+} // namespace Js
+} // namespace DesktopWebview

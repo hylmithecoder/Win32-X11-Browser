@@ -129,6 +129,108 @@ int main() {
 
   std::cout << "\n=========================================================="
             << std::endl;
+  std::cout << "Async: setTimeout / setInterval" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  // 15. setTimeout does not fire until the engine is pumped past its delay.
+  engine.execute("var fired = false; setTimeout(function(){ fired = true; }, "
+                 "100);");
+  Check("setTimeout does not fire immediately",
+        !engine.getGlobalEnv()->get("fired").boolVal);
+  engine.pump(50);
+  Check("setTimeout does not fire before its delay elapses",
+        !engine.getGlobalEnv()->get("fired").boolVal);
+  engine.pump(150);
+  Check("setTimeout fires once its delay has elapsed",
+        engine.getGlobalEnv()->get("fired").boolVal);
+
+  // 16. setInterval fires repeatedly; clearInterval stops it. The engine's
+  // virtual clock is already at 150ms from test 15, so pump far enough past
+  // that for several 10ms ticks to have elapsed.
+  engine.execute("var ticks = 0; var iv = setInterval(function(){ ticks++; "
+                 "}, 10);");
+  engine.pump(500);
+  Js::JsValue ticks1 = engine.getGlobalEnv()->get("ticks");
+  Check("setInterval fires multiple times (>= 3 well within 350ms/10ms)",
+        ticks1.numberVal >= 3.0);
+  engine.execute("clearInterval(iv);");
+  Js::JsValue ticks2 = engine.getGlobalEnv()->get("ticks");
+  engine.pump(2000);
+  Check("clearInterval stops further ticks",
+        engine.getGlobalEnv()->get("ticks").numberVal == ticks2.numberVal);
+
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "Async: Promise" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  // 17. Promise executor + .then() chain (resolved synchronously; .then()'s
+  // reaction runs as a microtask drained at the end of execute()).
+  engine.execute(
+      "var pResult = null;"
+      "new Promise(function(resolve, reject){ resolve(21); })"
+      "  .then(function(v){ return v * 2; })"
+      "  .then(function(v){ pResult = v; });");
+  Check("Promise chain resolves and both .then() reactions run (21*2=42)",
+        engine.getGlobalEnv()->get("pResult").numberVal == 42.0);
+
+  // 18. Promise rejection routed to .catch().
+  engine.execute("var caught = null;"
+                 "new Promise(function(resolve, reject){ reject('nope'); })"
+                 "  .then(function(v){ return v; })"
+                 "  .catch(function(e){ caught = e; });");
+  Check("rejection skips .then() and is handled by .catch()",
+        engine.getGlobalEnv()->get("caught").stringVal == "nope");
+
+  // 19. Promise.resolve / Promise.all.
+  engine.execute(
+      "var allResult = null;"
+      "Promise.all([Promise.resolve(1), 2, Promise.resolve(3)])"
+      "  .then(function(vs){ allResult = vs[0] + vs[1] + vs[2]; });");
+  Check("Promise.all resolves with all values (1+2+3=6)",
+        engine.getGlobalEnv()->get("allResult").numberVal == 6.0);
+
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "Async: async function / await" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  // 20. `await` on an already-resolved promise, inside an async function.
+  engine.execute("async function getVal(){ var v = await "
+                 "Promise.resolve(5); return v + 1; }"
+                 "var awaitResult = null;"
+                 "getVal().then(function(v){ awaitResult = v; });");
+  Check("await unwraps a resolved promise (5+1=6)",
+        engine.getGlobalEnv()->get("awaitResult").numberVal == 6.0);
+
+  // 21. `await` on a promise that only resolves once a timer fires: doAwait
+  // must itself pump the engine forward rather than returning too early.
+  engine.execute(
+      "function delay(ms, v){ return new Promise(function(resolve){ "
+      "setTimeout(function(){ resolve(v); }, ms); }); }"
+      "async function run(){ var a = await delay(30, 10); var b = await "
+      "delay(30, 20); return a + b; }"
+      "var delayedResult = null;"
+      "run().then(function(v){ delayedResult = v; });");
+  Check("await on a setTimeout-backed promise resolves via internal pumping "
+        "(10+20=30)",
+        engine.getGlobalEnv()->get("delayedResult").numberVal == 30.0);
+
+  // 22. An awaited rejection aborts the async function and rejects its
+  // promise; the caller observes it via .catch(), not a thrown C++ exception.
+  engine.execute(
+      "async function willReject(){ await Promise.reject('boom'); return "
+      "'unreached'; }"
+      "var rejectResult = null;"
+      "willReject().catch(function(e){ rejectResult = e; });");
+  Check("await on a rejected promise rejects the async function's promise",
+        engine.getGlobalEnv()->get("rejectResult").stringVal == "boom");
+
+  std::cout << "\n=========================================================="
+            << std::endl;
   if (g_failures == 0) {
     std::cout << "All JavaScript tests passed." << std::endl;
   } else {
