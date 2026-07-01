@@ -84,6 +84,9 @@ private:
   // Fetch bytes for an absolute url/path. Returns false on failure.
   bool fetchResource(const std::string &absUrl,
                      std::vector<std::uint8_t> &out) const;
+  std::string generatePdfHtml(const std::string &target);
+  float getPageYOffset(int pageNum) const;
+  void updatePdfCurrentPageOnScroll();
 
   // After styling, set width/height on <img>/<video> boxes (from attributes or
   // intrinsic image size) and give text-only blocks a line of height so they
@@ -159,6 +162,12 @@ private:
 
   // Text cursor position inside the address bar (m_urlText).
   size_t m_cursorPos = 0;
+
+  // PDF layout state variables
+  std::vector<std::pair<double, double>> m_pdfPageSizes;
+  float m_pdfZoom = 1.0f;
+  bool m_pdfSidebarOpen = true;
+  int m_pdfCurrentPage = 0;
 };
 
 } // namespace Browser

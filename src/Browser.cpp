@@ -522,6 +522,203 @@ bool Browser::fetchResource(const std::string &absUrl,
   return true;
 }
 
+float Browser::getPageYOffset(int pageNum) const {
+  float y = 50.0f; // estimated toolbar height + spacing
+  for (int i = 0; i < pageNum && i < m_pdfPageSizes.size(); ++i) {
+    y += m_pdfPageSizes[i].second * m_pdfZoom + 24.0f;
+  }
+  return y;
+}
+
+void Browser::updatePdfCurrentPageOnScroll() {
+  if (m_pdfPageSizes.empty()) {
+    return;
+  }
+  float viewportCenter = m_scrollY + (m_lastHeight - kBrowserHeight) / 2.0f;
+  int bestPage = 0;
+  float y = 50.0f; // toolbar + spacing
+  for (size_t i = 0; i < m_pdfPageSizes.size(); ++i) {
+    float pageH = m_pdfPageSizes[i].second * m_pdfZoom + 24.0f;
+    if (viewportCenter >= y && viewportCenter < y + pageH) {
+      bestPage = i;
+      break;
+    }
+    y += pageH;
+  }
+  if (bestPage != m_pdfCurrentPage) {
+    m_pdfCurrentPage = bestPage;
+    std::string html = generatePdfHtml(m_currentUrl);
+    loadHtml(html, m_currentUrl);
+  }
+}
+
+std::string Browser::generatePdfHtml(const std::string &target) {
+  // Build a clean filename for the title bar
+  std::string filename = target;
+  auto slashPos = filename.rfind('/');
+  if (slashPos != std::string::npos)
+    filename = filename.substr(slashPos + 1);
+  // URL-decode the filename
+  std::string displayName;
+  for (size_t k = 0; k < filename.size(); ++k) {
+    if (filename[k] == '%' && k + 2 < filename.size()) {
+      int hex = 0;
+      for (int d = 1; d <= 2; ++d) {
+        char c = filename[k + d];
+        hex = hex * 16 + (c >= '0' && c <= '9'   ? c - '0'
+                          : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                          : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                                 : 0);
+      }
+      displayName += static_cast<char>(hex);
+      k += 2;
+    } else if (filename[k] == '+') {
+      displayName += ' ';
+    } else {
+      displayName += filename[k];
+    }
+  }
+
+  int totalPages = static_cast<int>(m_pdfPageSizes.size());
+
+  // Build sidebar thumbnails HTML
+  std::string sidebarHtml;
+  for (int i = 0; i < totalPages; ++i) {
+    int tw = 120;
+    int th = static_cast<int>(
+        std::round(120.0 * m_pdfPageSizes[i].second / m_pdfPageSizes[i].first));
+
+    bool isActive = (i == m_pdfCurrentPage);
+    std::string divStyle =
+        "margin-bottom:12px; text-align:center; padding:6px 0;";
+    std::string imgStyle = "box-shadow:0 2px 6px rgba(0,0,0,0.5);";
+    std::string numStyle = "font-size:11px; margin-top:4px;";
+
+    if (isActive) {
+      divStyle += " background:#1a2a3a; border-radius:4px;";
+      imgStyle += " border:2px solid #4d90fe;";
+      numStyle += " color:#4d90fe; font-weight:bold;";
+    } else {
+      imgStyle += " border:2px solid #555;";
+      numStyle += " color:#888;";
+    }
+
+    sidebarHtml += "<div style=\"" + divStyle +
+                   "\">"
+                   "<a href=\"action://scroll-to-page/" +
+                   std::to_string(i) +
+                   "\">"
+                   "<img src=\"pdf://page/" +
+                   std::to_string(i) + "\" width=\"" + std::to_string(tw) +
+                   "\" height=\"" + std::to_string(th) + "\" style=\"" +
+                   imgStyle +
+                   "\">"
+                   "</a>"
+                   "<div style=\"" +
+                   numStyle + "\">" + std::to_string(i + 1) +
+                   "</div>"
+                   "</div>";
+  }
+
+  // Build main pages HTML
+  std::string pagesHtml;
+  for (int i = 0; i < totalPages; ++i) {
+    int w = static_cast<int>(std::round(m_pdfPageSizes[i].first * m_pdfZoom));
+    int h = static_cast<int>(std::round(m_pdfPageSizes[i].second * m_pdfZoom));
+    pagesHtml +=
+        "<div style=\"margin-bottom:24px; text-align:center;\">"
+        "<img src=\"pdf://page/" +
+        std::to_string(i) + "\" width=\"" + std::to_string(w) + "\" height=\"" +
+        std::to_string(h) +
+        "\" style=\"box-shadow:0 4px 12px rgba(0,0,0,0.6); border:1px solid "
+        "#1a1a1a;\">"
+        "<div style=\"color:#888; font-size:11px; margin-top:6px;\">Page " +
+        std::to_string(i + 1) +
+        "</div>"
+        "</div>";
+  }
+
+  std::string zoomPct = std::to_string(static_cast<int>(m_pdfZoom * 100)) + "%";
+
+  // Build full page layout with tables
+  std::string tableContent;
+  if (m_pdfSidebarOpen) {
+    tableContent +=
+        "<td style=\"width:160px; background:#252526; vertical-align:top; "
+        "border-right:1px solid #1a1a1a; padding:10px 0;\">" +
+        sidebarHtml + "</td>";
+  }
+  tableContent += "<td style=\"background:#3a3a3a; vertical-align:top; "
+                  "padding:20px 0; text-align:center;\">" +
+                  pagesHtml + "</td>";
+
+  std::string page =
+      "<html><head><title>" + displayName +
+      "</title>"
+      "<style>"
+      "*{box-sizing:border-box;margin:0;padding:0;}"
+      "body{background:#3a3a3a;font-family:sans-serif;font-size:13px;color:#"
+      "d4d4d4;}"
+      "a{color:#d4d4d4;text-decoration:none;font-weight:bold;}"
+      "a:hover{color:#ffffff;background:#4a4a4a;}"
+      "</style>"
+      "</head><body>"
+
+      // Toolbar
+      "<div style=\"background:#2d2d2d; border-bottom:1px solid #1a1a1a; "
+      "padding:8px 16px; color:#d4d4d4;\">"
+      "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" "
+      "style=\"width:100%;\">"
+      "<tr>"
+      "<td style=\"vertical-align:middle; text-align:left;\">"
+      "<a href=\"action://toggle-sidebar\" style=\"background:#4a4a4a; "
+      "padding:4px 8px; border-radius:4px; color:#fff; border:1px solid #555; "
+      "margin-right:12px;\">☰ Sidebar</a>"
+      "<span style=\"font-weight:bold; font-size:14px; color:#fff;\">" +
+      displayName +
+      "</span>"
+      "</td>"
+      "<td style=\"vertical-align:middle; text-align:center;\">"
+      "<a href=\"action://prev-page\" style=\"background:#4a4a4a; padding:4px "
+      "8px; border-radius:4px; color:#fff; border:1px solid #555; "
+      "margin-right:8px;\">◀ Prev</a>"
+      "<span style=\"font-weight:bold;\">Page " +
+      std::to_string(m_pdfCurrentPage + 1) + " / " +
+      std::to_string(totalPages) +
+      "</span>"
+      "<a href=\"action://next-page\" style=\"background:#4a4a4a; padding:4px "
+      "8px; border-radius:4px; color:#fff; border:1px solid #555; "
+      "margin-left:8px;\">Next ▶</a>"
+      "</td>"
+      "<td style=\"vertical-align:middle; text-align:right;\">"
+      "<a href=\"action://zoom-out\" style=\"background:#4a4a4a; padding:4px "
+      "8px; border-radius:4px; color:#fff; border:1px solid #555; "
+      "margin-right:8px;\">➖</a>"
+      "<span style=\"font-weight:bold; margin-right:8px;\">" +
+      zoomPct +
+      "</span>"
+      "<a href=\"action://zoom-in\" style=\"background:#4a4a4a; padding:4px "
+      "8px; border-radius:4px; color:#fff; border:1px solid #555; "
+      "margin-right:8px;\">➕</a>"
+      "<a href=\"action://zoom-reset\" style=\"background:#4a4a4a; padding:4px "
+      "8px; border-radius:4px; color:#fff; border:1px solid #555;\">Reset</a>"
+      "</td>"
+      "</tr>"
+      "</table>"
+      "</div>"
+
+      // Page body
+      "<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" "
+      "style=\"width:100%;\">"
+      "<tr>" +
+      tableContent +
+      "</tr>"
+      "</table>"
+      "</body></html>";
+
+  return page;
+}
+
 // ---------------------------------------------------------------------------
 // Navigation / loading
 // ---------------------------------------------------------------------------
@@ -530,6 +727,38 @@ bool Browser::navigate(const std::string &url) {
   DEBUG_LOGF("Navigating to: %s", LogLevel::INFO, url.c_str());
 
   std::string target = url;
+  if (target.rfind("action://", 0) == 0) {
+    if (target == "action://toggle-sidebar") {
+      m_pdfSidebarOpen = !m_pdfSidebarOpen;
+    } else if (target == "action://zoom-in") {
+      m_pdfZoom = std::min(4.0f, m_pdfZoom * 1.25f);
+    } else if (target == "action://zoom-out") {
+      m_pdfZoom = std::max(0.25f, m_pdfZoom / 1.25f);
+    } else if (target == "action://zoom-reset") {
+      m_pdfZoom = 1.0f;
+    } else if (target == "action://prev-page") {
+      if (m_pdfCurrentPage > 0) {
+        m_pdfCurrentPage--;
+        m_scrollY = getPageYOffset(m_pdfCurrentPage);
+      }
+    } else if (target == "action://next-page") {
+      if (m_pdfCurrentPage + 1 < m_pdfPageSizes.size()) {
+        m_pdfCurrentPage++;
+        m_scrollY = getPageYOffset(m_pdfCurrentPage);
+      }
+    } else if (target.rfind("action://scroll-to-page/", 0) == 0) {
+      int pageNum = std::atoi(target.c_str() + 24);
+      if (pageNum >= 0 && pageNum < m_pdfPageSizes.size()) {
+        m_pdfCurrentPage = pageNum;
+        m_scrollY = getPageYOffset(pageNum);
+      }
+    }
+
+    std::string html = generatePdfHtml(m_currentUrl);
+    loadHtml(html, m_currentUrl);
+    return true;
+  }
+
   // Bare host like "localhost:8080" -> assume http.
   if (target.find("://") == std::string::npos && !target.empty() &&
       target[0] != '/') {
@@ -590,45 +819,14 @@ bool Browser::navigate(const std::string &url) {
   if (ext == "pdf") {
     m_pdfBytes = bytes;
     m_pdfPages.clear();
-    std::vector<std::pair<double, double>> sizes;
-    if (Documents::pdfPageSizes(bytes, sizes) && !sizes.empty()) {
-      int totalPages = static_cast<int>(sizes.size());
-      std::string pageInfo = std::to_string(totalPages) + " halaman";
-      std::string imagesHtml;
-      for (int i = 0; i < totalPages; ++i) {
-        int w = static_cast<int>(std::round(sizes[i].first));
-        int h = static_cast<int>(std::round(sizes[i].second));
-        imagesHtml += "<img src=\"pdf://page/" + std::to_string(i) +
-                      "\" width=\"" + std::to_string(w) +
-                      "\" height=\"" + std::to_string(h) +
-                      "\" style=\"margin-bottom:8px;\">";
-      }
-      std::string page =
-          "<html><head><title>" + target +
-          "</title>"
-          "<style>"
-          "*{box-sizing:border-box;margin:0;padding:0}"
-          "body{background:#808080;font-family:sans-serif;font-size:13px;}"
-          ".toolbar{position:sticky;top:0;z-index:10;background:#f0f0f0;"
-          "border-bottom:1px solid #999;padding:6px 12px;display:flex;"
-          "align-items:center;gap:12px;color:#333;}"
-          ".toolbar .info{flex:1;overflow:hidden;text-overflow:ellipsis;"
-          "white-space:nowrap;}"
-          ".pdf-wrap{display:flex;flex-direction:column;align-items:center;"
-          "padding:12px 0 24px;}"
-          "img{display:block;box-shadow:0 2px 8px rgba(0,0,0,0.5);}"
-          "</style>"
-          "</head><body>"
-          "<div class=\"toolbar\">"
-          "<span class=\"info\">" +
-          pageInfo + " &mdash; " + target +
-          "</span>"
-          "</div>"
-          "<div class=\"pdf-wrap\">" +
-          imagesHtml +
-          "</div>"
-          "</body></html>";
-      return loadHtml(page, target);
+    m_pdfZoom = 1.0f;
+    m_pdfSidebarOpen = true;
+    m_pdfCurrentPage = 0;
+    if (Documents::pdfPageSizes(bytes, m_pdfPageSizes) &&
+        !m_pdfPageSizes.empty()) {
+      m_currentUrl = target;
+      std::string html = generatePdfHtml(target);
+      return loadHtml(html, target);
     }
     // Fall through to generic unknown-file handler below.
   }
@@ -729,8 +927,10 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     m_hasDoc = false;
     return false;
   }
+  if (baseUrl != m_currentUrl) {
+    m_scrollY = 0.0f;
+  }
   m_currentUrl = baseUrl;
-  m_scrollY = 0.0f;
   // A new document invalidates any text selection.
   m_selecting = false;
   m_selAnchor = SelPos{};
@@ -742,10 +942,10 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   }
   m_cursorPos = m_urlText.size();
 
-  // Release PDF image memory if we are navigating away from the PDF viewer
   if (html.find("pdf://page/") == std::string::npos) {
     m_pdfBytes.clear();
     m_pdfPages.clear();
+    m_pdfPageSizes.clear();
   }
 
   // Stylesheet = UA defaults (assets/ua.css) + link stylesheets + <style>
@@ -1049,7 +1249,8 @@ void Browser::compositeContent(Paint::Canvas &canvas,
       if (srcVal.rfind("pdf://page/", 0) == 0) {
         int pageNum = std::atoi(srcVal.c_str() + 11);
         float viewportTop = m_scrollY;
-        float viewportBottom = m_scrollY + static_cast<float>(m_lastHeight - kBrowserHeight);
+        float viewportBottom =
+            m_scrollY + static_cast<float>(m_lastHeight - kBrowserHeight);
         // Only render and blit if the page intersects the scroll viewport
         if (c.y + c.height >= viewportTop && c.y <= viewportBottom) {
           auto &img = m_pdfPages[pageNum];
@@ -1647,10 +1848,12 @@ bool Browser::handleKey(const KeyInput &key) {
 
   case KeyInput::Up:
     m_scrollY = std::max(0.0f, m_scrollY - 30.0f);
+    updatePdfCurrentPageOnScroll();
     return true;
 
   case KeyInput::Down:
     m_scrollY += 30.0f;
+    updatePdfCurrentPageOnScroll();
     return true;
   }
   return false;
@@ -1661,6 +1864,7 @@ bool Browser::handleScroll(int delta) {
   if (m_scrollY < 0.0f) {
     m_scrollY = 0.0f;
   }
+  updatePdfCurrentPageOnScroll();
   return true;
 }
 
