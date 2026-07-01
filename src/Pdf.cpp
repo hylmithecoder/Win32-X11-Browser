@@ -53,7 +53,7 @@ struct Object {
 };
 
 static const Object *DictFind(const Object &obj, const char *key) {
-  if (obj.kind != Kind::kDict)
+  if (obj.kind != Kind::kDict && obj.kind != Kind::kStream)
     return nullptr;
   for (const auto &kv : obj.dict) {
     // Keys from readName() include the leading '/', so match both
@@ -966,6 +966,13 @@ static bool BuildPdf(const std::vector<std::uint8_t> &data, PdfData &pdf) {
                                reinterpret_cast<std::uint8_t *>(decoded) +
                                    outLen);
             free(decoded);
+            DEBUG_LOG("[PDF] obj %d %d: decompressed FlateDecode stream "
+                      "successfully to %d bytes",
+                      e.num, e.gen, outLen);
+          } else {
+            DEBUG_LOG("[PDF] obj %d %d: failed to decompress FlateDecode "
+                      "stream of size %zu",
+                      e.num, e.gen, body.stream.size());
           }
         }
       }
