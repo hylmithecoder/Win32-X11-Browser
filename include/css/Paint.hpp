@@ -38,6 +38,8 @@ struct DisplayCommand {
   CommandType type = CommandType::SolidRect;
   Layout::Rect rect;
   Color color;
+  // border-radius, in px; 0 for a plain rect. Uniform on all four corners
+  float radius = 0;
 };
 
 using DisplayList = std::vector<DisplayCommand>;
@@ -63,6 +65,10 @@ public:
   // Alpha-blend `color` over the (clipped) rectangle. Coordinates are rounded
   // to the nearest pixel; the rect is clipped to the canvas bounds.
   void fillRect(const Layout::Rect &rect, Color color);
+
+  // As fillRect, but excludes the four corner regions outside a `radius`-px
+  // rounded-rect boundary (radius <= 0 behaves exactly like fillRect).
+  void fillRoundedRect(const Layout::Rect &rect, float radius, Color color);
 
   // Alpha-blend `color` over a single pixel (clipped to bounds). The primitive
   // used by image blitting and SVG/shape rasterisation.

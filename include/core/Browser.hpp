@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+using namespace std;
+
 namespace DesktopWebview {
 namespace Browser {
 
@@ -44,12 +46,12 @@ struct KeyInput {
 
 // Saved state for a single tab (everything needed to restore it).
 struct Tab {
-  std::string url;
-  std::string title;
-  std::string htmlContent; // cached HTML for reload
+  string url;
+  string title;
+  string htmlContent; // cached HTML for reload
   float scrollY = 0.0f;
   // PDF state
-  std::vector<std::pair<double, double>> pdfPageSizes;
+  vector<pair<double, double>> pdfPageSizes;
   float pdfZoom = 1.0f;
   bool pdfSidebarOpen = true;
   int pdfCurrentPage = 0;
@@ -57,8 +59,8 @@ struct Tab {
 
 // A navigation history entry.
 struct HistoryEntry {
-  std::string url;
-  std::string htmlContent;
+  string url;
+  string htmlContent;
 };
 
 class Browser {
@@ -68,20 +70,20 @@ public:
   static constexpr int kBrowserHeight = 36;
   static constexpr int kTabBarHeight = 32;
 
-  bool navigate(const std::string &url);
-  bool loadHtml(const std::string &html, const std::string &baseUrl);
+  bool navigate(const string &url);
+  bool loadHtml(const string &html, const string &baseUrl);
   bool handleKey(const KeyInput &key);
   bool handleClick(int x, int y);
   bool handleMouseDown(int x, int y);
   bool handleMouseMove(int x, int y);
   bool handleMouseUp(int x, int y);
-  std::string selectedText() const;
+  string selectedText() const;
   bool handleScroll(int delta);
   Paint::Canvas render(int width, int height);
 
-  const std::string &urlText() const { return m_urlText; }
-  const std::string &currentUrl() const { return m_currentUrl; }
-  void setUrlText(const std::string &text) { m_urlText = text; }
+  const string &urlText() const { return m_urlText; }
+  const string &currentUrl() const { return m_currentUrl; }
+  void setUrlText(const string &text) { m_urlText = text; }
 
   // Navigation
   bool goBack();
@@ -91,24 +93,26 @@ public:
   // Tab management
   int tabCount() const { return static_cast<int>(m_tabs.size()); }
   int activeTabIndex() const { return m_activeTab; }
-  bool newTab(const std::string &url = "about:blank");
+  bool newTab(const string &url = "about:blank");
   bool closeTab(int index);
   bool switchTab(int index);
 
   // Clipboard
-  void handlePaste(const std::string &text);
-  std::function<void()> m_requestPaste;
-  std::function<void(const std::string &)> m_copyText;
+  void handlePaste(const string &text);
+  function<void()> m_requestPaste;
+  function<void(const string &)> m_copyText;
+
+  // JSON
+  string resolveJson(string data);
 
 private:
   Paint::Canvas renderPage(int width, int height);
   void drawBrowser(Paint::Canvas &canvas, int width);
   void drawTabBar(Paint::Canvas &canvas, int width);
 
-  std::string resolveUrl(const std::string &ref) const;
-  bool fetchResource(const std::string &absUrl,
-                     std::vector<std::uint8_t> &out) const;
-  std::string generatePdfHtml(const std::string &target);
+  string resolveUrl(const string &ref) const;
+  bool fetchResource(const string &absUrl, vector<uint8_t> &out) const;
+  string generatePdfHtml(const string &target);
   float getPageYOffset(int pageNum) const;
   void updatePdfCurrentPageOnScroll();
 
@@ -124,7 +128,7 @@ private:
   // ---- Text selection -----------------------------------------------------
   struct TextRun {
     Layout::Rect rect;
-    std::string text;
+    string text;
     int fontSize = 16;
     int tx = 0;
   };
@@ -135,9 +139,9 @@ private:
 
   bool textRunFor(const Layout::LayoutBox &box, TextRun &out) const;
   void collectTextRuns(const Layout::LayoutBox &box,
-                       std::vector<TextRun> &runs) const;
-  SelPos hitTest(const std::vector<TextRun> &runs, float px, float py) const;
-  std::vector<TextRun> layoutTextRuns() const;
+                       vector<TextRun> &runs) const;
+  SelPos hitTest(const vector<TextRun> &runs, float px, float py) const;
+  vector<TextRun> layoutTextRuns() const;
   void paintSelection(Paint::Canvas &canvas, int runIdx,
                       const TextRun &run) const;
 
@@ -147,33 +151,33 @@ private:
   int m_paintRunCursor = 0;
 
   // ---- Tab + history state ------------------------------------------------
-  std::vector<Tab> m_tabs;
+  vector<Tab> m_tabs;
   int m_activeTab = 0;
 
   // Per-tab navigation history (index into m_tabs)
   // Each tab has its own history stack
-  std::vector<std::vector<HistoryEntry>> m_tabHistory;
-  std::vector<int> m_tabHistoryIndex;
+  vector<vector<HistoryEntry>> m_tabHistory;
+  vector<int> m_tabHistoryIndex;
 
   // ---- Current page state (live, belonging to active tab) ------------------
-  std::string m_urlText;
-  std::string m_currentUrl;
-  std::string m_status;
-  std::string m_title;
+  string m_urlText;
+  string m_currentUrl;
+  string m_status;
+  string m_title;
 
   bool m_hasDoc = false;
   Wrapper::HtmlDocument m_doc;
   Css::Stylesheet m_sheet;
   Layout::StyledNode m_style;
   Wrapper::Node m_focusedNode;
-  std::unique_ptr<Js::JsEngine> m_jsEngine;
+  unique_ptr<Js::JsEngine> m_jsEngine;
 
-  std::map<std::string, Image::Bitmap> m_images;
-  std::vector<std::uint8_t> m_pdfBytes;
-  std::map<int, Image::Bitmap> m_pdfPages;
-  std::map<std::string, std::unique_ptr<Video::VideoSource>> m_videos;
+  map<string, Image::Bitmap> m_images;
+  vector<uint8_t> m_pdfBytes;
+  map<int, Image::Bitmap> m_pdfPages;
+  map<string, unique_ptr<Video::VideoSource>> m_videos;
   Audio::AudioPlayer m_audioPlayer;
-  std::chrono::steady_clock::time_point m_startTime;
+  chrono::steady_clock::time_point m_startTime;
 
   int m_lastWidth = 1024;
   int m_lastHeight = 720;
@@ -193,17 +197,17 @@ private:
   int m_urlSelFocus = -1;
   bool m_urlSelecting = false; // true while dragging in URL bar
 
-  std::string urlBarSelectedText() const;
+  string urlBarSelectedText() const;
   void urlBarDeleteSelection();
 
   // PDF state
-  std::vector<std::pair<double, double>> m_pdfPageSizes;
+  vector<pair<double, double>> m_pdfPageSizes;
   float m_pdfZoom = 1.0f;
   bool m_pdfSidebarOpen = true;
   int m_pdfCurrentPage = 0;
 
   // Cached HTML for current tab reload
-  std::string m_currentHtml;
+  string m_currentHtml;
 };
 
 } // namespace Browser

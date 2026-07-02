@@ -69,8 +69,11 @@ struct DomInterface {
   std::function<void(const std::string &)> setTitle;
   std::function<void(const std::string &, const std::string &)> setElementText;
   std::function<std::string(const std::string &)> getElementText;
-  std::function<std::string(const std::string &, const std::string &)> getElementAttribute;
-  std::function<void(const std::string &, const std::string &, const std::string &)> setElementAttribute;
+  std::function<std::string(const std::string &, const std::string &)>
+      getElementAttribute;
+  std::function<void(const std::string &, const std::string &,
+                     const std::string &)>
+      setElementAttribute;
   std::function<std::vector<std::string>(const std::string &)> querySelectorAll;
 };
 

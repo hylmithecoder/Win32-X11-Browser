@@ -52,13 +52,13 @@ struct AttributeSelector {
 // set `neverMatches`, so a rule guarded by them applies only in the state it
 // describes -- never unconditionally.
 struct SimpleSelector {
-  std::string tag;                          // lower-cased tag name, or "" if none
-  std::string id;                           // id without '#', or "" if none
-  std::vector<std::string> classes;         // class names without '.'
+  std::string tag;                  // lower-cased tag name, or "" if none
+  std::string id;                   // id without '#', or "" if none
+  std::vector<std::string> classes; // class names without '.'
   std::vector<AttributeSelector> attributes; // [attr], [attr=val], ...
-  std::vector<std::string> pseudoClasses;   // evaluable pseudos, e.g. "checked"
-  bool universal = false;                   // true when '*' is present
-  bool neverMatches = false;                // unsupported pseudo / pseudo-element
+  std::vector<std::string> pseudoClasses; // evaluable pseudos, e.g. "checked"
+  bool universal = false;                 // true when '*' is present
+  bool neverMatches = false;              // unsupported pseudo / pseudo-element
 
   // True when this selector imposes no constraints (e.g. bare "*").
   bool isUnconstrained() const {

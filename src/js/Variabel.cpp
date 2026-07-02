@@ -1,9 +1,13 @@
 #include "Variabel.hpp"
 #include "Debugger.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 
 using namespace Debug;
 
@@ -43,6 +47,85 @@ double toNum(const JsValue &v) {
   }
   return std::nan("");
 }
+
+namespace {
+
+// Build a Date instance: a plain object carrying `epochMs` baked into each of
+// its bound getter/formatter methods at construction time (this engine has no
+// mutable-field object model for builtins, so the value is captured by the
+// closures rather than stored on the object and re-read per call).
+JsValue makeDateInstance(double epochMs) {
+  JsValue d(ValueType::Object);
+
+  auto bind0 = [&](const char *name, double value) {
+    d.setProperty(name,
+                  JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                      [value](const std::vector<JsValue> &) {
+                        return JsValue(value);
+                      })));
+  };
+  auto bindStr = [&](const char *name, const std::string &value) {
+    d.setProperty(name,
+                  JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                      [value](const std::vector<JsValue> &) {
+                        return JsValue(value);
+                      })));
+  };
+
+  bind0("getTime", epochMs);
+  bind0("valueOf", epochMs);
+
+  std::time_t secs = static_cast<std::time_t>(epochMs / 1000.0);
+  int millis =
+      static_cast<int>(epochMs - static_cast<double>(secs) * 1000.0);
+  if (millis < 0) {
+    millis += 1000; // negative epochMs (pre-1970): keep millis in [0,1000)
+  }
+  std::tm local = *std::localtime(&secs);
+  std::tm utc = *std::gmtime(&secs);
+
+  bind0("getFullYear", local.tm_year + 1900);
+  bind0("getMonth", local.tm_mon); // 0-indexed, matches JS
+  bind0("getDate", local.tm_mday);
+  bind0("getDay", local.tm_wday); // 0 = Sunday, matches JS
+  bind0("getHours", local.tm_hour);
+  bind0("getMinutes", local.tm_min);
+  bind0("getSeconds", local.tm_sec);
+  bind0("getMilliseconds", millis);
+
+  // "3:45:12 PM" -- the common en-US default toLocaleTimeString() format.
+  int h12 = local.tm_hour % 12;
+  if (h12 == 0) {
+    h12 = 12;
+  }
+  std::ostringstream ts;
+  ts << h12 << ":" << std::setfill('0') << std::setw(2) << local.tm_min
+     << ":" << std::setfill('0') << std::setw(2) << local.tm_sec << " "
+     << (local.tm_hour < 12 ? "AM" : "PM");
+  bindStr("toLocaleTimeString", ts.str());
+
+  // "M/D/YYYY" -- the common en-US default toLocaleDateString() format.
+  std::ostringstream ds;
+  ds << (local.tm_mon + 1) << "/" << local.tm_mday << "/"
+     << (local.tm_year + 1900);
+  bindStr("toLocaleDateString", ds.str());
+  bindStr("toLocaleString", ds.str() + ", " + ts.str());
+
+  // "YYYY-MM-DDTHH:MM:SS.mmmZ" (UTC) -- toISOString() is unambiguous, so it
+  // uses UTC rather than local time, matching the real Date API.
+  std::ostringstream iso;
+  iso << std::setfill('0') << std::setw(4) << (utc.tm_year + 1900) << "-"
+      << std::setw(2) << (utc.tm_mon + 1) << "-" << std::setw(2)
+      << utc.tm_mday << "T" << std::setw(2) << utc.tm_hour << ":"
+      << std::setw(2) << utc.tm_min << ":" << std::setw(2) << utc.tm_sec
+      << "." << std::setw(3) << millis << "Z";
+  bindStr("toISOString", iso.str());
+  bindStr("toString", iso.str());
+
+  return d;
+}
+
+} // namespace
 
 void JsEngine::initBuiltins() {
   // console.log / warn / error / info
@@ -244,8 +327,7 @@ void JsEngine::initBuiltins() {
   windowObj.setProperty(
       "alert", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
                    [](const std::vector<JsValue> &a) {
-                     MSGBOX_INFO("alert",
-                                 (a.empty() ? "" : a[0].toString()));
+                     MSGBOX_INFO("alert", (a.empty() ? "" : a[0].toString()));
                      return JsValue();
                    })));
   m_globalEnv->set("window", windowObj);
@@ -254,99 +336,106 @@ void JsEngine::initBuiltins() {
   // setTimeout/setInterval schedule a real Timer, run later from pump() (the
   // Browser calls pump() once per render tick); any arguments after the
   // delay are forwarded to the callback, matching the DOM API.
-  m_globalEnv->set(
-      "setTimeout",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this](const std::vector<JsValue> &a) -> JsValue {
-            if (a.empty() || !a[0].callback) {
-              return JsValue();
-            }
-            Timer t;
-            t.id = m_nextTimerId++;
-            t.dueMs = m_virtualNowMs + (a.size() > 1 ? toNum(a[1]) : 0.0);
-            t.callback = a[0];
-            if (a.size() > 2) {
-              t.args.assign(a.begin() + 2, a.end());
-            }
-            m_timers.push_back(t);
-            return JsValue(static_cast<double>(t.id));
-          })));
-  m_globalEnv->set(
-      "setInterval",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this](const std::vector<JsValue> &a) -> JsValue {
-            if (a.empty() || !a[0].callback) {
-              return JsValue();
-            }
-            Timer t;
-            t.id = m_nextTimerId++;
-            t.intervalMs = a.size() > 1 ? std::max(0.0, toNum(a[1])) : 0.0;
-            t.dueMs = m_virtualNowMs + t.intervalMs;
-            t.repeating = true;
-            t.callback = a[0];
-            if (a.size() > 2) {
-              t.args.assign(a.begin() + 2, a.end());
-            }
-            m_timers.push_back(t);
-            return JsValue(static_cast<double>(t.id));
-          })));
-  m_globalEnv->set(
-      "clearTimeout",
-      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-          [this](const std::vector<JsValue> &a) -> JsValue {
-            if (!a.empty()) {
-              int id = static_cast<int>(toNum(a[0]));
-              for (Timer &t : m_timers) {
-                if (t.id == id) {
-                  t.cancelled = true;
-                }
-              }
-            }
-            return JsValue();
-          })));
+  m_globalEnv->set("setTimeout",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [this](const std::vector<JsValue> &a) -> JsValue {
+                         if (a.empty() || !a[0].callback) {
+                           return JsValue();
+                         }
+                         Timer t;
+                         t.id = m_nextTimerId++;
+                         t.dueMs = m_virtualNowMs +
+                                   (a.size() > 1 ? toNum(a[1]) : 0.0);
+                         t.callback = a[0];
+                         if (a.size() > 2) {
+                           t.args.assign(a.begin() + 2, a.end());
+                         }
+                         m_timers.push_back(t);
+                         return JsValue(static_cast<double>(t.id));
+                       })));
+  m_globalEnv->set("setInterval",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [this](const std::vector<JsValue> &a) -> JsValue {
+                         if (a.empty() || !a[0].callback) {
+                           return JsValue();
+                         }
+                         Timer t;
+                         t.id = m_nextTimerId++;
+                         t.intervalMs =
+                             a.size() > 1 ? std::max(0.0, toNum(a[1])) : 0.0;
+                         t.dueMs = m_virtualNowMs + t.intervalMs;
+                         t.repeating = true;
+                         t.callback = a[0];
+                         if (a.size() > 2) {
+                           t.args.assign(a.begin() + 2, a.end());
+                         }
+                         m_timers.push_back(t);
+                         return JsValue(static_cast<double>(t.id));
+                       })));
+  m_globalEnv->set("clearTimeout",
+                   JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [this](const std::vector<JsValue> &a) -> JsValue {
+                         if (!a.empty()) {
+                           int id = static_cast<int>(toNum(a[0]));
+                           for (Timer &t : m_timers) {
+                             if (t.id == id) {
+                               t.cancelled = true;
+                             }
+                           }
+                         }
+                         return JsValue();
+                       })));
   // Intervals share the same id space/vector as timeouts, so cancellation is
   // identical either way.
   m_globalEnv->set("clearInterval", m_globalEnv->get("clearTimeout"));
 
-  // Minimal Date: just the .now() static most timing code actually needs.
-  JsValue dateObj(ValueType::Object);
-  dateObj.setProperty(
+  // Date: `new Date()`/`new Date(ms)` return a bound-methods instance (see
+  // makeDateInstance) using the real wall clock, not m_virtualNowMs -- that
+  // field is purely internal timer-scheduling bookkeeping relative to page
+  // load, not a value that should ever show up in a rendered date/time.
+  auto nowEpochMs = []() {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+  };
+  JsValue dateGlobal(std::function<JsValue(const std::vector<JsValue> &)>(
+      [nowEpochMs](const std::vector<JsValue> &a) -> JsValue {
+        double ms = a.empty() ? nowEpochMs() : toNum(a[0]);
+        return makeDateInstance(ms);
+      }));
+  dateGlobal.setProperty(
       "now", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                 [this](const std::vector<JsValue> &) {
-                   return JsValue(m_virtualNowMs);
+                 [nowEpochMs](const std::vector<JsValue> &) {
+                   return JsValue(nowEpochMs());
                  })));
-  m_globalEnv->set("Date", dateObj);
+  m_globalEnv->set("Date", dateGlobal);
 
   // ---- Promise --------------------------------------------------------
-  JsValue promiseGlobal(
-      std::function<JsValue(const std::vector<JsValue> &)>(
-          [this](const std::vector<JsValue> &a) -> JsValue {
-            JsValue p = makePromise();
-            if (!a.empty() && a[0].callback) {
-              auto obj = p.objVal;
-              JsEngine *eng = this;
-              JsValue resolveFn(
-                  std::function<JsValue(const std::vector<JsValue> &)>(
-                      [obj, eng](const std::vector<JsValue> &ra) {
-                        eng->resolvePromiseObj(
-                            obj, ra.empty() ? JsValue() : ra[0]);
-                        return JsValue();
-                      }));
-              JsValue rejectFn(
-                  std::function<JsValue(const std::vector<JsValue> &)>(
-                      [obj, eng](const std::vector<JsValue> &ra) {
-                        eng->rejectPromiseObj(
-                            obj, ra.empty() ? JsValue() : ra[0]);
-                        return JsValue();
-                      }));
-              try {
-                a[0].callback({resolveFn, rejectFn});
-              } catch (RejectSignal &rs) {
-                rejectPromiseObj(obj, rs.value);
-              }
-            }
-            return p;
-          }));
+  JsValue promiseGlobal(std::function<JsValue(const std::vector<JsValue> &)>(
+      [this](const std::vector<JsValue> &a) -> JsValue {
+        JsValue p = makePromise();
+        if (!a.empty() && a[0].callback) {
+          auto obj = p.objVal;
+          JsEngine *eng = this;
+          JsValue resolveFn(
+              std::function<JsValue(const std::vector<JsValue> &)>(
+                  [obj, eng](const std::vector<JsValue> &ra) {
+                    eng->resolvePromiseObj(obj, ra.empty() ? JsValue() : ra[0]);
+                    return JsValue();
+                  }));
+          JsValue rejectFn(std::function<JsValue(const std::vector<JsValue> &)>(
+              [obj, eng](const std::vector<JsValue> &ra) {
+                eng->rejectPromiseObj(obj, ra.empty() ? JsValue() : ra[0]);
+                return JsValue();
+              }));
+          try {
+            a[0].callback({resolveFn, rejectFn});
+          } catch (RejectSignal &rs) {
+            rejectPromiseObj(obj, rs.value);
+          }
+        }
+        return p;
+      }));
   promiseGlobal.setProperty(
       "resolve", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
                      [this](const std::vector<JsValue> &a) {
@@ -362,67 +451,61 @@ void JsEngine::initBuiltins() {
       "reject", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
                     [this](const std::vector<JsValue> &a) {
                       JsValue p = makePromise();
-                      rejectPromiseObj(p.objVal,
-                                       a.empty() ? JsValue() : a[0]);
+                      rejectPromiseObj(p.objVal, a.empty() ? JsValue() : a[0]);
                       return p;
                     })));
   promiseGlobal.setProperty(
-      "all", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                 [this](const std::vector<JsValue> &a) -> JsValue {
-                   JsValue result = makePromise();
-                   JsValue arr = a.empty() ? JsValue() : a[0];
-                   if (!arr.objVal || !arr.objVal->isArray ||
-                       arr.objVal->elements.empty()) {
-                     JsValue empty(ValueType::Object);
-                     empty.objVal->isArray = true;
-                     resolvePromiseObj(result.objVal, empty);
-                     return result;
-                   }
-                   size_t n = arr.objVal->elements.size();
-                   auto remaining =
-                       std::make_shared<int>(static_cast<int>(n));
-                   auto results =
-                       std::make_shared<std::vector<JsValue>>(n);
-                   auto resultObj = result.objVal;
-                   JsEngine *eng = this;
-                   auto settleOne = [remaining, results, resultObj,
-                                     eng](size_t idx, JsValue v) {
-                     (*results)[idx] = v;
-                     if (--(*remaining) == 0) {
-                       JsValue arrOut(ValueType::Object);
-                       arrOut.objVal->isArray = true;
-                       arrOut.objVal->elements = *results;
-                       eng->resolvePromiseObj(resultObj, arrOut);
-                     }
-                   };
-                   for (size_t idx = 0; idx < n; ++idx) {
-                     JsValue item = arr.objVal->elements[idx];
-                     if (item.objVal && item.objVal->isPromise) {
-                       promiseThen(
-                           item.objVal,
-                           JsValue(std::function<JsValue(
-                                       const std::vector<JsValue> &)>(
-                               [idx, settleOne](
-                                   const std::vector<JsValue> &v) {
-                                 settleOne(idx,
-                                           v.empty() ? JsValue() : v[0]);
-                                 return JsValue();
-                               })),
-                           JsValue(std::function<JsValue(
-                                       const std::vector<JsValue> &)>(
-                               [resultObj, eng](
-                                   const std::vector<JsValue> &v) {
-                                 eng->rejectPromiseObj(
-                                     resultObj,
-                                     v.empty() ? JsValue() : v[0]);
-                                 return JsValue();
-                               })));
-                     } else {
-                       settleOne(idx, item);
-                     }
-                   }
-                   return result;
-                 })));
+      "all",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &a) -> JsValue {
+            JsValue result = makePromise();
+            JsValue arr = a.empty() ? JsValue() : a[0];
+            if (!arr.objVal || !arr.objVal->isArray ||
+                arr.objVal->elements.empty()) {
+              JsValue empty(ValueType::Object);
+              empty.objVal->isArray = true;
+              resolvePromiseObj(result.objVal, empty);
+              return result;
+            }
+            size_t n = arr.objVal->elements.size();
+            auto remaining = std::make_shared<int>(static_cast<int>(n));
+            auto results = std::make_shared<std::vector<JsValue>>(n);
+            auto resultObj = result.objVal;
+            JsEngine *eng = this;
+            auto settleOne = [remaining, results, resultObj, eng](size_t idx,
+                                                                  JsValue v) {
+              (*results)[idx] = v;
+              if (--(*remaining) == 0) {
+                JsValue arrOut(ValueType::Object);
+                arrOut.objVal->isArray = true;
+                arrOut.objVal->elements = *results;
+                eng->resolvePromiseObj(resultObj, arrOut);
+              }
+            };
+            for (size_t idx = 0; idx < n; ++idx) {
+              JsValue item = arr.objVal->elements[idx];
+              if (item.objVal && item.objVal->isPromise) {
+                promiseThen(
+                    item.objVal,
+                    JsValue(
+                        std::function<JsValue(const std::vector<JsValue> &)>(
+                            [idx, settleOne](const std::vector<JsValue> &v) {
+                              settleOne(idx, v.empty() ? JsValue() : v[0]);
+                              return JsValue();
+                            })),
+                    JsValue(
+                        std::function<JsValue(const std::vector<JsValue> &)>(
+                            [resultObj, eng](const std::vector<JsValue> &v) {
+                              eng->rejectPromiseObj(
+                                  resultObj, v.empty() ? JsValue() : v[0]);
+                              return JsValue();
+                            })));
+              } else {
+                settleOne(idx, item);
+              }
+            }
+            return result;
+          })));
   m_globalEnv->set("Promise", promiseGlobal);
 }
 

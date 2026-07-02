@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -320,41 +321,101 @@ bool BorderColor(const Layout::LayoutBox &box, Color &out) {
   return false;
 }
 
+// First whitespace-separated numeric token in `value` (a bare number or one
+// with a unit suffix, e.g. "10px" -> 10), or 0 if none parses.
+float FirstLengthToken(const std::string &value) {
+  std::stringstream ss(value);
+  std::string tok;
+  while (ss >> tok) {
+    char *end = nullptr;
+    double v = std::strtod(tok.c_str(), &end);
+    if (end != tok.c_str()) {
+      return static_cast<float>(v);
+    }
+  }
+  return 0.0f;
+}
+
+// Resolve a box's border-radius in px, clamped to half its smaller border-box
+// dimension (an oversized radius would otherwise overshoot into a shape
+// larger than the box itself, e.g. a circle bigger than its own square box).
+float BorderRadius(const Layout::LayoutBox &box) {
+  std::string raw = box.value("border-radius");
+  if (raw.empty()) {
+    return 0.0f;
+  }
+  float r = FirstLengthToken(raw);
+  if (r <= 0.0f) {
+    return 0.0f;
+  }
+  Layout::Rect bb = box.dimensions.borderBox();
+  float maxR = std::min(bb.width, bb.height) / 2.0f;
+  return std::min(r, maxR);
+}
+
 void PaintBox(const Layout::LayoutBox &box, DisplayList &out) {
   const Layout::Dimensions &d = box.dimensions;
 
-  // Background fills the border box.
   Color bg;
-  if (BackgroundColor(box, bg)) {
-    out.push_back({CommandType::SolidRect, d.borderBox(), bg});
-  }
-
-  // Borders: four solid rects around the padding box, drawn in the border
-  // colour. Only emitted when a colour resolves and the edge has width.
+  bool hasBg = BackgroundColor(box, bg);
   Color bc;
-  if (BorderColor(box, bc)) {
-    Layout::Rect border = d.borderBox();
-    if (d.border.left > 0) {
-      out.push_back({CommandType::SolidRect,
-                     {border.x, border.y, d.border.left, border.height},
-                     bc});
+  bool hasBorderWidth = d.border.left > 0 || d.border.right > 0 ||
+                        d.border.top > 0 || d.border.bottom > 0;
+  bool hasBorder = hasBorderWidth && BorderColor(box, bc);
+  float radius = BorderRadius(box);
+
+  if (radius > 0) {
+    // Rounded corners: four independent straight edge rects (below) cannot
+    // express a rounded border, and true per-corner arc-segment geometry is
+    // more precision than this engine's other approximate rendering (e.g.
+    // Elements::paint's circular checkboxes) aims for. Instead, fill the
+    // border-box in the border colour, then the padding-box (inset by the
+    // border width, with a correspondingly smaller radius) in the background
+    // colour on top -- a border "stroke" via two nested rounded fills.
+    if (hasBorder) {
+      out.push_back({CommandType::SolidRect, d.borderBox(), bc, radius});
     }
-    if (d.border.right > 0) {
-      out.push_back({CommandType::SolidRect,
-                     {border.x + border.width - d.border.right, border.y,
-                      d.border.right, border.height},
-                     bc});
+    if (hasBg) {
+      float inset = hasBorder ? std::max({d.border.left, d.border.right,
+                                          d.border.top, d.border.bottom})
+                              : 0.0f;
+      float innerRadius = std::max(0.0f, radius - inset);
+      Layout::Rect innerRect = hasBorder ? d.paddingBox() : d.borderBox();
+      out.push_back(
+          {CommandType::SolidRect, innerRect, bg, innerRadius});
     }
-    if (d.border.top > 0) {
-      out.push_back({CommandType::SolidRect,
-                     {border.x, border.y, border.width, d.border.top},
-                     bc});
+  } else {
+    // Background fills the border box.
+    if (hasBg) {
+      out.push_back({CommandType::SolidRect, d.borderBox(), bg});
     }
-    if (d.border.bottom > 0) {
-      out.push_back({CommandType::SolidRect,
-                     {border.x, border.y + border.height - d.border.bottom,
-                      border.width, d.border.bottom},
-                     bc});
+    // Borders: four solid rects around the padding box, drawn in the border
+    // colour. Only emitted when a colour resolves and the edge has width.
+    if (hasBorder) {
+      Layout::Rect border = d.borderBox();
+      if (d.border.left > 0) {
+        out.push_back({CommandType::SolidRect,
+                       {border.x, border.y, d.border.left, border.height},
+                       bc});
+      }
+      if (d.border.right > 0) {
+        out.push_back({CommandType::SolidRect,
+                       {border.x + border.width - d.border.right, border.y,
+                        d.border.right, border.height},
+                       bc});
+      }
+      if (d.border.top > 0) {
+        out.push_back({CommandType::SolidRect,
+                       {border.x, border.y, border.width, d.border.top},
+                       bc});
+      }
+      if (d.border.bottom > 0) {
+        out.push_back(
+            {CommandType::SolidRect,
+             {border.x, border.y + border.height - d.border.bottom,
+              border.width, d.border.bottom},
+             bc});
+      }
     }
   }
 
@@ -429,6 +490,60 @@ void Canvas::fillRect(const Layout::Rect &rect, Color color) {
   }
 }
 
+void Canvas::fillRoundedRect(const Layout::Rect &rect, float radius,
+                             Color color) {
+  if (radius <= 0.0f) {
+    fillRect(rect, color);
+    return;
+  }
+  int x0 = static_cast<int>(std::lround(rect.x));
+  int y0 = static_cast<int>(std::lround(rect.y));
+  int x1 = static_cast<int>(std::lround(rect.x + rect.width));
+  int y1 = static_cast<int>(std::lround(rect.y + rect.height));
+  x0 = std::clamp(x0, 0, m_width);
+  y0 = std::clamp(y0, 0, m_height);
+  x1 = std::clamp(x1, 0, m_width);
+  y1 = std::clamp(y1, 0, m_height);
+
+  float r = std::min({radius, rect.width / 2.0f, rect.height / 2.0f});
+  float left = rect.x, top = rect.y;
+  float right = rect.x + rect.width, bottom = rect.y + rect.height;
+
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      float px = x + 0.5f, py = y + 0.5f;
+      // Only the four r-by-r corner squares need a distance check; the rest
+      // of the rect is a plain fill (an "H" + "I" cross of unclipped area
+      // between/around the rounded corners).
+      float cx = 0, cy = 0;
+      bool inCorner = true;
+      if (px < left + r && py < top + r) {
+        cx = left + r;
+        cy = top + r;
+      } else if (px > right - r && py < top + r) {
+        cx = right - r;
+        cy = top + r;
+      } else if (px < left + r && py > bottom - r) {
+        cx = left + r;
+        cy = bottom - r;
+      } else if (px > right - r && py > bottom - r) {
+        cx = right - r;
+        cy = bottom - r;
+      } else {
+        inCorner = false;
+      }
+      if (inCorner) {
+        float dx = px - cx, dy = py - cy;
+        if (dx * dx + dy * dy > r * r) {
+          continue; // outside the rounded corner: leave the pixel untouched
+        }
+      }
+      Color &dst = m_pixels[static_cast<size_t>(y) * m_width + x];
+      dst = BlendOver(dst, color);
+    }
+  }
+}
+
 void Canvas::blendPixel(int x, int y, Color color) {
   if (x < 0 || y < 0 || x >= m_width || y >= m_height) {
     return;
@@ -441,7 +556,11 @@ void Canvas::paint(const DisplayList &list) {
   for (const DisplayCommand &cmd : list) {
     switch (cmd.type) {
     case CommandType::SolidRect:
-      fillRect(cmd.rect, cmd.color);
+      if (cmd.radius > 0) {
+        fillRoundedRect(cmd.rect, cmd.radius, cmd.color);
+      } else {
+        fillRect(cmd.rect, cmd.color);
+      }
       break;
     }
   }

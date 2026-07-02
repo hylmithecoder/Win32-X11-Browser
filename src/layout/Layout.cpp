@@ -1,5 +1,6 @@
 #include "Layout.hpp"
 #include "Font.hpp"
+#include "HandlerCssVariable.hpp"
 #include "Input.hpp"
 
 #include <algorithm>
@@ -1533,6 +1534,13 @@ StyledNode styleTree(const Wrapper::Node &domRoot,
   // anyway -- computing it would just waste a pass over every rule).
   sn.styles = domRoot.isElement() ? Css::computeStyle(sheet, domRoot)
                                   : std::map<std::string, std::string>{};
+  if (domRoot.isElement()) {
+    // Resolve var(--x) references against the cascade now, once per element,
+    // rather than leaving literal "var(...)" text for every later consumer
+    // (Layout's own box-model parsing, Paint's colour parsing, Browser's
+    // inline-text colour resolution) to separately fail to understand.
+    Css::resolveCssVariables(domRoot, sheet, sn.styles);
+  }
   // Walk every child node (elements *and* text), not just domRoot.children()
   // (which is element-only): a bare text node interleaved with elements, e.g.
   // "Click " in "Click <a>here</a>", must still become a box, or its text

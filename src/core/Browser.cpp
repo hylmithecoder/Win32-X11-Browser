@@ -3,9 +3,11 @@
 #include "Debugger.hpp"
 #include "Documents.hpp"
 #include "Font.hpp"
+#include "HandlerCssVariable.hpp"
 #include "Input.hpp"
 #include "JsEngine.hpp"
 #include "Net.hpp"
+#include "json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -14,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 
 using namespace Debug;
 
@@ -34,7 +37,14 @@ std::string ResolveInheritedPropertyForDomNode(const Wrapper::Node &domNode,
         Css::computeStyle(sheet, current);
     auto it = style.find(property);
     if (it != style.end() && !it->second.empty()) {
-      return it->second;
+      // This walk is its own fresh computeStyle() pass (not the cached,
+      // already-var()-resolved m_style tree Layout::styleTree built), so a
+      // var(--x) reference here has not been substituted yet -- do that
+      // relative to `current` (the node the value actually came from),
+      // matching how Layout::styleTree resolves it for every other property.
+      std::map<std::string, std::string> single = {{property, it->second}};
+      Css::resolveCssVariables(current, sheet, single);
+      return single[property];
     }
     current = current.parent();
   }
@@ -87,6 +97,91 @@ std::string ToLower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return std::tolower(c); });
   return s;
+}
+
+// Escape HTML special characters so raw text (file contents, JSON, etc.) can
+// be embedded inside a generated page without being interpreted as markup.
+std::string EscapeHtml(const std::string &text) {
+  std::string escaped;
+  escaped.reserve(text.size());
+  for (unsigned char c : text) {
+    if (c == '&') {
+      escaped += "&amp;";
+    } else if (c == '<') {
+      escaped += "&lt;";
+    } else if (c == '>') {
+      escaped += "&gt;";
+    } else {
+      escaped += c;
+    }
+  }
+  return escaped;
+}
+
+// Emit one rendered JSON line as its own <div> (a block box, so it reliably
+// stacks vertically) rather than relying on a <pre> + literal "\n": this
+// engine's inline text layout always collapses runs of whitespace regardless
+// of any "white-space" CSS, so newlines inside a single text run would not
+// survive to be visible. Leading indentation uses &nbsp; (U+00A0) instead of
+// literal spaces for the same reason -- ASCII spaces collapse, a non-breaking
+// space does not.
+void JsonLine(std::string &out, int indent, const std::string &content) {
+  out += "<div>";
+  for (int i = 0; i < indent * 2; ++i) {
+    out += "&nbsp;";
+  }
+  out += content + "</div>";
+}
+
+// Recursively pretty-print a parsed JSON value as syntax-highlighted,
+// indented HTML (keys/strings/numbers/booleans/null each get their own
+// <span> class), matching the built-in JSON viewer browsers show for a raw
+// .json response. `prefix` is prepended to the value's opening line (a key
+// label for object members, empty at the root/for array elements); `suffix`
+// is appended after the value's closing line (a trailing "," between
+// siblings). Appends <div> lines to `out` rather than returning a string so
+// nested calls don't repeatedly reallocate/concatenate.
+void JsonToHtml(const nlohmann::json &j, std::string &out, int indent,
+                const std::string &prefix, const std::string &suffix) {
+  if (j.is_object()) {
+    if (j.empty()) {
+      JsonLine(out, indent, prefix + "{}" + suffix);
+      return;
+    }
+    JsonLine(out, indent, prefix + "{");
+    size_t i = 0, n = j.size();
+    for (auto it = j.begin(); it != j.end(); ++it, ++i) {
+      std::string keyPrefix =
+          "<span class=\"jkey\">\"" + EscapeHtml(it.key()) + "\"</span>: ";
+      JsonToHtml(it.value(), out, indent + 1, keyPrefix,
+                (i + 1 < n) ? "," : "");
+    }
+    JsonLine(out, indent, "}" + suffix);
+  } else if (j.is_array()) {
+    if (j.empty()) {
+      JsonLine(out, indent, prefix + "[]" + suffix);
+      return;
+    }
+    JsonLine(out, indent, prefix + "[");
+    for (size_t i = 0; i < j.size(); ++i) {
+      JsonToHtml(j[i], out, indent + 1, "", (i + 1 < j.size()) ? "," : "");
+    }
+    JsonLine(out, indent, "]" + suffix);
+  } else if (j.is_string()) {
+    JsonLine(out, indent,
+            prefix + "<span class=\"jstr\">\"" +
+                EscapeHtml(j.get<std::string>()) + "\"</span>" + suffix);
+  } else if (j.is_boolean()) {
+    JsonLine(out, indent,
+            prefix + "<span class=\"jbool\">" +
+                (j.get<bool>() ? "true" : "false") + "</span>" + suffix);
+  } else if (j.is_null()) {
+    JsonLine(out, indent, prefix + "<span class=\"jnull\">null</span>" + suffix);
+  } else {
+    // number (int/float)
+    JsonLine(out, indent,
+            prefix + "<span class=\"jnum\">" + j.dump() + "</span>" + suffix);
+  }
 }
 
 // Collapse runs of whitespace to single spaces and trim, for display.
@@ -1042,6 +1137,23 @@ bool Browser::navigate(const std::string &url) {
     // Fall through to generic unknown-file handler below.
   }
 
+  if (ext == "json") {
+    DEBUG_LOG("This file is JSON %s", ext.c_str());
+    std::string bodyText(reinterpret_cast<const char *>(bytes.data()),
+                         bytes.size());
+    std::string html = resolveJson(bodyText);
+    m_currentHtml = html;
+    if (!isAction && m_activeTab >= 0 &&
+        m_activeTab < static_cast<int>(m_tabHistory.size())) {
+      auto &hist = m_tabHistory[m_activeTab];
+      int idx = m_tabHistoryIndex[m_activeTab];
+      hist.resize(idx + 1);
+      hist.push_back({target, html});
+      m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+    }
+    return loadHtml(html, target);
+  }
+
   // Check file type configuration for non-video media.
   const FileTypeInfo *ft = LookupFileType(ext);
   if (ft) {
@@ -1052,19 +1164,7 @@ bool Browser::navigate(const std::string &url) {
       // the check for future use.
       std::string bodyText(reinterpret_cast<const char *>(bytes.data()),
                            bytes.size());
-      // Escape HTML special characters for safe display.
-      std::string escaped;
-      escaped.reserve(bodyText.size());
-      for (unsigned char c : bodyText) {
-        if (c == '&')
-          escaped += "&amp;";
-        else if (c == '<')
-          escaped += "&lt;";
-        else if (c == '>')
-          escaped += "&gt;";
-        else
-          escaped += c;
-      }
+      std::string escaped = EscapeHtml(bodyText);
       std::string page =
           "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>" +
           std::string(ft->label) +
@@ -1118,18 +1218,7 @@ bool Browser::navigate(const std::string &url) {
   // Unknown file type: show raw content with dark background + white text.
   std::string bodyText(reinterpret_cast<const char *>(bytes.data()),
                        bytes.size());
-  std::string escaped;
-  escaped.reserve(bodyText.size());
-  for (unsigned char c : bodyText) {
-    if (c == '&')
-      escaped += "&amp;";
-    else if (c == '<')
-      escaped += "&lt;";
-    else if (c == '>')
-      escaped += "&gt;";
-    else
-      escaped += c;
-  }
+  std::string escaped = EscapeHtml(bodyText);
   std::string page =
       "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
       "<style>"
@@ -2873,6 +2962,39 @@ void Browser::handlePaste(const std::string &text) {
     m_cursorPos = m_urlText.size();
   m_urlText.insert(m_cursorPos, text);
   m_cursorPos += text.size();
+}
+
+string Browser::resolveJson(string data) {
+  std::string bodyHtml;
+  try {
+    nlohmann::json parsed = nlohmann::json::parse(data);
+    JsonToHtml(parsed, bodyHtml, 0, "", "");
+  } catch (const nlohmann::json::parse_error &e) {
+    // Malformed JSON: fall back to the escaped raw text (still safe to
+    // embed) plus the parser's own error, one <div> per line, rather than
+    // showing a blank page.
+    JsonLine(bodyHtml, 0, "<span class=\"jerr\">Invalid JSON: " +
+                              EscapeHtml(e.what()) + "</span>");
+    std::istringstream lines(data);
+    std::string line;
+    while (std::getline(lines, line)) {
+      JsonLine(bodyHtml, 0, EscapeHtml(line));
+    }
+  }
+  return "<!DOCTYPE html><html><head><meta "
+        "charset=\"utf-8\"><title>JSON</title>"
+        "<style>"
+        "body { margin:0; padding:16px; background-color:#1e1e1e; "
+        "color:#d4d4d4; "
+        "font-family:monospace; font-size:14px; }"
+        "div { white-space:pre; }"
+        ".jkey { color:#9cdcfe; }"
+        ".jstr { color:#ce9178; }"
+        ".jnum { color:#b5cea8; }"
+        ".jbool, .jnull { color:#569cd6; }"
+        ".jerr { color:#f48771; }"
+        "</style></head><body>" +
+        bodyHtml + "</body></html>";
 }
 
 } // namespace Browser

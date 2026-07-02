@@ -108,8 +108,9 @@ SimpleSelector ParseSimpleSelector(const std::string &token) {
         sel.id = name;
       }
     } else if (c == ':') {
-      // Pseudo-class (:x) or pseudo-element (::x). Pseudo-elements always target
-      // a box we do not generate, so the rule can never match a real element.
+      // Pseudo-class (:x) or pseudo-element (::x). Pseudo-elements always
+      // target a box we do not generate, so the rule can never match a real
+      // element.
       ++i;
       bool pseudoElement = false;
       if (i < n && token[i] == ':') {
@@ -140,10 +141,9 @@ SimpleSelector ParseSimpleSelector(const std::string &token) {
       // (dynamic state like :hover/:focus, structural functions, pseudo-
       // elements) is marked non-matching rather than silently dropped.
       static const char *kSupported[] = {
-          "checked",   "disabled",    "enabled",     "required",
-          "optional",  "read-only",   "read-write",  "first-child",
-          "last-child", "only-child", "root",        "link",
-          "any-link"};
+          "checked",   "disabled",   "enabled",     "required",   "optional",
+          "read-only", "read-write", "first-child", "last-child", "only-child",
+          "root",      "link",       "any-link"};
       bool supported = false;
       if (!pseudoElement && !functional) {
         for (const char *s : kSupported) {
@@ -283,9 +283,9 @@ bool MatchAttribute(const AttributeSelector &attr,
     return std::find(parts.begin(), parts.end(), want) != parts.end();
   }
   case '|': // exactly `want`, or `want` followed by '-'
-    return have == want ||
-           (have.size() > want.size() && have.compare(0, want.size(), want) == 0 &&
-            have[want.size()] == '-');
+    return have == want || (have.size() > want.size() &&
+                            have.compare(0, want.size(), want) == 0 &&
+                            have[want.size()] == '-');
   case '^': // prefix
     return !want.empty() && have.size() >= want.size() &&
            have.compare(0, want.size(), want) == 0;
@@ -626,6 +626,23 @@ std::map<std::string, std::string> computeStyle(const Stylesheet &sheet,
   std::vector<Candidate> candidates;
   int order = 0;
 
+  // `background` is a shorthand; nothing in this engine expands shorthands
+  // into their longhands, so a plain-colour "background: X" and an explicit
+  // "background-color: Y" are unrelated keys in the final map with no
+  // cascade relationship -- whichever happens to still be set wins outright,
+  // regardless of specificity/source order. Mirror a "background" candidate
+  // into "background-color" at the same cascade priority so it fairly
+  // competes for (and can correctly win or lose) that slot instead.
+  auto pushCandidate = [&](Declaration decl, int tier, const Specificity &spec,
+                           int ord) {
+    candidates.push_back({decl, tier, spec, ord});
+    if (decl.property == "background") {
+      Declaration bg = decl;
+      bg.property = "background-color";
+      candidates.push_back({std::move(bg), tier, spec, ord});
+    }
+  };
+
   for (const Rule &rule : sheet.rules) {
     // A rule may list several selectors; use the highest-specificity one that
     // matches this node.
@@ -644,14 +661,13 @@ std::map<std::string, std::string> computeStyle(const Stylesheet &sheet,
       continue;
     }
     for (const Declaration &decl : rule.declarations) {
-      candidates.push_back({decl, decl.important ? 2 : 0, best, order++});
+      pushCandidate(decl, decl.important ? 2 : 0, best, order++);
     }
   }
 
   // Inline style="" declarations sit in their own (higher) tier.
   for (const Declaration &decl : parseDeclarations(node.attribute("style"))) {
-    candidates.push_back(
-        {decl, decl.important ? 3 : 1, Specificity{}, order++});
+    pushCandidate(decl, decl.important ? 3 : 1, Specificity{}, order++);
   }
 
   std::stable_sort(candidates.begin(), candidates.end(),

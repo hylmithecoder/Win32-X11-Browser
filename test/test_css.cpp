@@ -1,4 +1,5 @@
 #include "Css.hpp"
+#include "HandlerCssVariable.hpp"
 #include "Wrapper.hpp"
 #include <iostream>
 #include <string>
@@ -274,12 +275,63 @@ static void AttrAndPseudoTests() {
         !Css::matches(sel("a::before"), lnk));
 }
 
+static void CssVariableTests() {
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "CSS custom properties (variables)" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  const std::string html =
+      "<html><body>"
+      "<div id=\"scoped\" style=\"--local: navy;\">"
+      "<p id=\"a\" style=\"color: var(--bs-primary);\">a</p>"
+      "<p id=\"b\" style=\"color: var(--missing, orange);\">b</p>"
+      "<p id=\"c\" style=\"color: var(--local);\">c</p>"
+      "<p id=\"d\" style=\"color: var(--alias);\">d</p>"
+      "</div>"
+      "</body></html>";
+  const std::string css = ":root { --bs-primary: #0d6efd; --alias: var(--bs-primary); }";
+
+  Wrapper::HtmlDocument doc;
+  doc.parse(html);
+  Css::Stylesheet sheet = Css::parse(css);
+
+  Wrapper::Node a = doc.getElementById("a");
+  Wrapper::Node b = doc.getElementById("b");
+  Wrapper::Node c = doc.getElementById("c");
+  Wrapper::Node d = doc.getElementById("d");
+  Check("test nodes found", a.valid() && b.valid() && c.valid() && d.valid());
+
+  Check(":root --bs-primary is visible on a descendant",
+        Css::getCssVariable(a, sheet, "bs-primary") == "#0d6efd");
+  Check("undeclared variable resolves to \"\"",
+        Css::getCssVariable(a, sheet, "does-not-exist").empty());
+
+  auto resolvedColor = [&](Wrapper::Node &node) {
+    std::map<std::string, std::string> style = Css::computeStyle(sheet, node);
+    Css::resolveCssVariables(node, sheet, style);
+    auto it = style.find("color");
+    return it == style.end() ? std::string("<none>") : it->second;
+  };
+
+  Check("var(--bs-primary) resolves through :root",
+        resolvedColor(a) == "#0d6efd");
+  Check("var(--missing, orange) falls back when undeclared",
+        resolvedColor(b) == "orange");
+  Check("var(--local) resolves an inline-style-declared variable",
+        resolvedColor(c) == "navy");
+  Check("var(--alias) resolves transitively (--alias: var(--bs-primary))",
+        resolvedColor(d) == "#0d6efd");
+}
+
 int main() {
   ParsingTests();
   SpecificityTests();
   MatchingTests();
   AttrAndPseudoTests();
   CascadeTests();
+  CssVariableTests();
 
   std::cout << "\n=========================================================="
             << std::endl;

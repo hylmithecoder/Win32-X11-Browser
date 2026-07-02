@@ -42,9 +42,13 @@ static void ColorTests() {
   Check("rgb(1, 2, 3)", Paint::parseColor("rgb(1, 2, 3)", c) && Eq(c, 1, 2, 3));
   Check("rgba(0,0,0,0.5) -> a~128",
         Paint::parseColor("rgba(0,0,0,0.5)", c) && c.a >= 126 && c.a <= 129);
-  Check("rgba w/ space and slash", Paint::parseColor("rgba(255 0 0 / 50%)", c) && Eq(c, 255, 0, 0, 128));
-  Check("hsl(120, 100%, 50%) -> lime", Paint::parseColor("hsl(120, 100%, 50%)", c) && Eq(c, 0, 255, 0, 255));
-  Check("hsla(240, 100%, 50%, 0.8)", Paint::parseColor("hsla(240, 100%, 50%, 0.8)", c) && Eq(c, 0, 0, 255, 204));
+  Check("rgba w/ space and slash",
+        Paint::parseColor("rgba(255 0 0 / 50%)", c) && Eq(c, 255, 0, 0, 128));
+  Check("hsl(120, 100%, 50%) -> lime",
+        Paint::parseColor("hsl(120, 100%, 50%)", c) && Eq(c, 0, 255, 0, 255));
+  Check("hsla(240, 100%, 50%, 0.8)",
+        Paint::parseColor("hsla(240, 100%, 50%, 0.8)", c) &&
+            Eq(c, 0, 0, 255, 204));
   Check("'transparent' rejected", !Paint::parseColor("transparent", c));
   Check("empty rejected", !Paint::parseColor("", c));
   Check("unknown keyword rejected", !Paint::parseColor("notacolor", c));
@@ -53,8 +57,7 @@ static void ColorTests() {
 // Build a small page and lay it out at 200px wide.
 static Layout::LayoutBox BuildScene(Wrapper::HtmlDocument &doc,
                                     Layout::StyledNode &styleOut) {
-  const std::string html =
-      "<html><body><div id=\"box\">x</div></body></html>";
+  const std::string html = "<html><body><div id=\"box\">x</div></body></html>";
   const std::string css =
       "body { background-color: white; }"
       "#box { width: 100px; height: 50px; background-color: red;"
@@ -79,7 +82,8 @@ static void DisplayListTests() {
 
   Paint::DisplayList list = Paint::buildDisplayList(root);
 
-  // Expected commands: body background (1) + box background (1) + 4 borders = 6.
+  // Expected commands: body background (1) + box background (1) + 4 borders
+  // = 6.
   Check("6 paint commands emitted", list.size() == 6);
 
   // First command is the body's white background covering the viewport width.
@@ -152,10 +156,56 @@ static void RasterTests() {
         packed.size() == 1 && packed[0] == 0x00ff8800u);
 }
 
+static void BorderRadiusTests() {
+  std::cout << "\n=========================================================="
+            << std::endl;
+  std::cout << "border-radius" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  // A 100x100 red box with a 20px radius, no border, on a white background.
+  const std::string html = "<html><body><div id=\"box\"></div></body></html>";
+  const std::string css =
+      "body { background-color: white; margin: 0; }"
+      "#box { width: 100px; height: 100px; background-color: red; "
+      "       border-radius: 20px; }";
+  Wrapper::HtmlDocument doc;
+  doc.parse(html);
+  Css::Stylesheet sheet = Css::parse(css);
+  Layout::StyledNode style = Layout::styleTree(doc.root(), sheet);
+  Layout::LayoutBox root = Layout::layout(style, 100.0f);
+  Paint::DisplayList list = Paint::buildDisplayList(root);
+
+  Paint::Canvas canvas(100, 100);
+  canvas.paint(list);
+
+  Check("centre of a rounded box is filled", Eq(canvas.at(50, 50), 255, 0, 0));
+  Check("edge midpoint (away from any corner) is filled",
+        Eq(canvas.at(50, 2), 255, 0, 0));
+  Check("extreme corner pixel is outside the radius arc (background shows)",
+        Eq(canvas.at(0, 0), 255, 255, 255));
+  Check("a point just inside the rounded corner's arc is filled",
+        Eq(canvas.at(6, 6), 255, 0, 0));
+
+  // radius <= 0 (unset) must fall back to an ordinary square fill -- the
+  // extreme corner is no longer excluded.
+  const std::string cssSquare =
+      "body { background-color: white; margin: 0; }"
+      "#box { width: 100px; height: 100px; background-color: red; }";
+  Css::Stylesheet sheetSquare = Css::parse(cssSquare);
+  Layout::StyledNode styleSquare = Layout::styleTree(doc.root(), sheetSquare);
+  Layout::LayoutBox rootSquare = Layout::layout(styleSquare, 100.0f);
+  Paint::Canvas canvasSquare(100, 100);
+  canvasSquare.paint(Paint::buildDisplayList(rootSquare));
+  Check("no border-radius: corner pixel IS filled (square box)",
+        Eq(canvasSquare.at(0, 0), 255, 0, 0));
+}
+
 int main() {
   ColorTests();
   DisplayListTests();
   RasterTests();
+  BorderRadiusTests();
 
   std::cout << "\n=========================================================="
             << std::endl;
