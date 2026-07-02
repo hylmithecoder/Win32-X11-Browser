@@ -378,6 +378,60 @@ bool MatchSimple(const SimpleSelector &sel, const Wrapper::Node &element) {
   return true;
 }
 
+// Strip one layer of matching quotes from a trimmed value.
+std::string Unquote(const std::string &s) {
+  if (s.size() >= 2 && (s.front() == '"' || s.front() == '\'') &&
+      s.back() == s.front()) {
+    return s.substr(1, s.size() - 2);
+  }
+  return s;
+}
+
+// Extract every url(...) argument from a CSS src: value, in source order.
+// Handles optionally quoted urls and backslash escapes (e.g. a literal `\,`
+// in a filename); format(...) hints and other tokens are ignored.
+std::vector<std::string> ExtractUrls(const std::string &value) {
+  std::vector<std::string> urls;
+  size_t i = 0;
+  while (i + 4 <= value.size()) {
+    if (std::tolower(static_cast<unsigned char>(value[i])) != 'u' ||
+        std::tolower(static_cast<unsigned char>(value[i + 1])) != 'r' ||
+        std::tolower(static_cast<unsigned char>(value[i + 2])) != 'l' ||
+        value[i + 3] != '(') {
+      ++i;
+      continue;
+    }
+    size_t j = i + 4;
+    std::string url;
+    while (j < value.size() && value[j] != ')') {
+      if (value[j] == '\\' && j + 1 < value.size()) {
+        ++j; // escaped character: keep it verbatim
+      }
+      url.push_back(value[j]);
+      ++j;
+    }
+    url = Unquote(Trim(url));
+    if (!url.empty()) {
+      urls.push_back(std::move(url));
+    }
+    i = (j < value.size()) ? j + 1 : j;
+  }
+  return urls;
+}
+
+// Parse the declarations of an @font-face block into a FontFace. Returns
+// false when the block lacks a usable font-family or src.
+bool ParseFontFace(const std::string &block, FontFace &out) {
+  for (const Declaration &decl : parseDeclarations(block)) {
+    if (decl.property == "font-family") {
+      out.family = Unquote(Trim(decl.value));
+    } else if (decl.property == "src") {
+      out.sources = ExtractUrls(decl.value);
+    }
+  }
+  return !out.family.empty() && !out.sources.empty();
+}
+
 bool EvaluateMediaQuery(const std::string &prelude, float viewportWidth) {
   std::string cond = prelude;
   size_t mediaPos = cond.find("@media");
@@ -565,6 +619,16 @@ Stylesheet parse(const std::string &cssRaw, float viewportWidth) {
           sheet.rules.insert(sheet.rules.end(),
                              std::make_move_iterator(innerSheet.rules.begin()),
                              std::make_move_iterator(innerSheet.rules.end()));
+          sheet.fontFaces.insert(
+              sheet.fontFaces.end(),
+              std::make_move_iterator(innerSheet.fontFaces.begin()),
+              std::make_move_iterator(innerSheet.fontFaces.end()));
+        }
+      } else if (prelude.rfind("@font-face", 0) == 0) {
+        FontFace face;
+        if (ParseFontFace(css.substr(blockStart, blockEnd - blockStart),
+                          face)) {
+          sheet.fontFaces.push_back(std::move(face));
         }
       }
       continue;

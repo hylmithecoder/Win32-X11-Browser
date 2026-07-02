@@ -1,6 +1,7 @@
 #include "Layout.hpp"
 #include "Font.hpp"
 #include "HandlerCssVariable.hpp"
+#include "HtmlElement.hpp"
 #include "Input.hpp"
 
 #include <algorithm>
@@ -203,35 +204,11 @@ std::array<Value, 4> ResolveBorder(const LayoutBox &box) {
   return edges;
 }
 
-// User-agent default `display` for a subset of HTML tags.
+// User-agent default `display` for HTML tags. Delegates to HtmlElement for
+// the canonical definition; falls back to "inline" for unknown tags.
 std::string DefaultDisplay(const std::string &tag) {
-  static const std::vector<std::string> block = {
-      "html",  "body",     "div",     "p",          "h1",         "h2",
-      "h3",    "h4",       "h5",      "h6",         "ul",         "ol",
-      "li",    "section",  "article", "header",     "footer",     "nav",
-      "main",  "aside",    "figure",  "figcaption", "blockquote", "pre",
-      "table", "form",     "hr",      "address",    "dl",         "dt",
-      "dd",    "fieldset", "thead",   "tbody",      "tfoot",      "caption"};
-  static const std::vector<std::string> none = {"head", "title",    "meta",
-                                                "link", "style",    "script",
-                                                "base", "noscript", "template"};
-
-  std::string t = ToLower(tag);
-  if (std::find(none.begin(), none.end(), t) != none.end()) {
-    return "none";
-  }
-  // Table rows use flex so that <td>/<th> cells lay out horizontally.
-  if (t == "tr") {
-    return "flex";
-  }
-  // Table cells and header cells are block containers.
-  if (t == "td" || t == "th") {
-    return "block";
-  }
-  if (std::find(block.begin(), block.end(), t) != block.end()) {
-    return "block";
-  }
-  return "inline";
+  const char *d = HtmlElement::DefaultDisplay(tag);
+  return d ? std::string(d) : "inline";
 }
 
 // ---- box tree construction -------------------------------------------------
@@ -240,6 +217,8 @@ std::string DefaultDisplay(const std::string &tag) {
 // forward-declared here since BuildLayoutTree (which needs them) comes first.
 std::string CollapseInlineWhitespace(const std::string &s);
 int ResolveOwnFontSize(const StyledNode &sn, int inherited);
+std::string ResolveOwnFontFamily(const StyledNode &sn,
+                                 const std::string &inherited);
 
 LayoutBox &InlineContainer(LayoutBox &box) {
   if (box.type == BoxType::Inline || box.type == BoxType::Anonymous) {
@@ -276,10 +255,12 @@ void TrimInlineEdges(std::vector<LayoutBox> &list) {
   }
 }
 
-LayoutBox BuildLayoutTree(const StyledNode &sn, int inheritedFontSize) {
+LayoutBox BuildLayoutTree(const StyledNode &sn, int inheritedFontSize,
+                          const std::string &inheritedFontFamily) {
   LayoutBox box;
   box.node = &sn;
   box.fontSize = ResolveOwnFontSize(sn, inheritedFontSize);
+  box.fontFamily = ResolveOwnFontFamily(sn, inheritedFontFamily);
   if (sn.node.isText()) {
     box.text = CollapseInlineWhitespace(sn.node.text());
   }
@@ -301,18 +282,20 @@ LayoutBox BuildLayoutTree(const StyledNode &sn, int inheritedFontSize) {
         }
         if (gd == "inline" || gd == "inline-block") {
           InlineContainer(box).children.push_back(
-              BuildLayoutTree(gc, box.fontSize));
+              BuildLayoutTree(gc, box.fontSize, box.fontFamily));
         } else {
-          box.children.push_back(BuildLayoutTree(gc, box.fontSize));
+          box.children.push_back(
+              BuildLayoutTree(gc, box.fontSize, box.fontFamily));
         }
       }
       continue;
     }
     if (childDisp == "inline" || childDisp == "inline-block") {
       InlineContainer(box).children.push_back(
-          BuildLayoutTree(child, box.fontSize));
+          BuildLayoutTree(child, box.fontSize, box.fontFamily));
     } else {
-      box.children.push_back(BuildLayoutTree(child, box.fontSize));
+      box.children.push_back(
+          BuildLayoutTree(child, box.fontSize, box.fontFamily));
     }
   }
 
@@ -582,6 +565,17 @@ int ResolveOwnFontSize(const StyledNode &sn, int inherited) {
   return static_cast<int>(val); // px (and unrecognised units treated as px)
 }
 
+// This node's own font-family, given the inherited value; unset falls back to
+// `inherited`. The raw CSS list is kept as-is; Font::* resolves it per call.
+std::string ResolveOwnFontFamily(const StyledNode &sn,
+                                 const std::string &inherited) {
+  auto it = sn.styles.find("font-family");
+  if (it == sn.styles.end() || it->second.empty()) {
+    return inherited;
+  }
+  return it->second;
+}
+
 void CalculateInlineWidth(LayoutBox &box, const Dimensions &containing);
 
 void CalculateInlineWidth(LayoutBox &box, const Dimensions &containing) {
@@ -615,7 +609,7 @@ void CalculateInlineWidth(LayoutBox &box, const Dimensions &containing) {
                                ? box.text
                                : CollapseWhitespace(box.node->node.text());
         int fontSize = GetFontSizeForBox(box);
-        w = static_cast<float>(Font::textWidth(text, fontSize));
+        w = static_cast<float>(Font::textWidth(text, fontSize, box.fontFamily));
 
         // Form controls are replaced elements; their intrinsic width comes from
         // the Elements module (the single source of truth for control sizing).
@@ -669,7 +663,7 @@ void CalculateInlineHeight(LayoutBox &box) {
         h = 0;
       } else {
         int fontSize = GetFontSizeForBox(box);
-        h = static_cast<float>(Font::lineHeight(fontSize));
+        h = static_cast<float>(Font::lineHeight(fontSize, box.fontFamily));
 
         if (Elements::isFormControl(box.node->node)) {
           h = static_cast<float>(
@@ -693,6 +687,17 @@ void LayoutInlineChildren(LayoutBox &box) {
   float lineHeight = 0;
 
   for (LayoutBox &child : box.children) {
+    // <br> forces a line break: reset X to the start, advance Y by the
+    // current line height, and skip the rest of the iteration (br has no
+    // intrinsic width or height).
+    if (child.node && child.node->node.isElement() &&
+        HtmlElement::IsLineBreakElement(child.node->node.name())) {
+      curX = d.content.x;
+      curY += lineHeight > 0 ? lineHeight : child.fontSize;
+      lineHeight = 0;
+      continue;
+    }
+
     CalculateInlineWidth(child, d);
 
     float childW = child.dimensions.marginBox().width;
@@ -1563,7 +1568,8 @@ LayoutBox layout(const StyledNode &styleRoot, float viewportWidth,
   viewport.content.height = 0; // running offset; root stacks from y = 0
   (void)viewportHeight;        // reserved for percentage-height resolution
 
-  LayoutBox root = BuildLayoutTree(styleRoot, /*inheritedFontSize=*/16);
+  LayoutBox root = BuildLayoutTree(styleRoot, /*inheritedFontSize=*/16,
+                                   /*inheritedFontFamily=*/"");
   Layout(root, viewport);
   return root;
 }

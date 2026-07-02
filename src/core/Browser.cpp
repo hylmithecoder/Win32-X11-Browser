@@ -198,7 +198,7 @@ void JsonToHtml(const nlohmann::json &j, std::string &out, int indent,
       std::string keyPrefix =
           "<span class=\"jkey\">\"" + EscapeHtml(it.key()) + "\"</span>: ";
       JsonToHtml(it.value(), out, indent + 1, keyPrefix,
-                (i + 1 < n) ? "," : "");
+                 (i + 1 < n) ? "," : "");
     }
     JsonLine(out, indent, "}" + suffix);
   } else if (j.is_array()) {
@@ -213,18 +213,19 @@ void JsonToHtml(const nlohmann::json &j, std::string &out, int indent,
     JsonLine(out, indent, "]" + suffix);
   } else if (j.is_string()) {
     JsonLine(out, indent,
-            prefix + "<span class=\"jstr\">\"" +
-                EscapeHtml(j.get<std::string>()) + "\"</span>" + suffix);
+             prefix + "<span class=\"jstr\">\"" +
+                 EscapeHtml(j.get<std::string>()) + "\"</span>" + suffix);
   } else if (j.is_boolean()) {
     JsonLine(out, indent,
-            prefix + "<span class=\"jbool\">" +
-                (j.get<bool>() ? "true" : "false") + "</span>" + suffix);
+             prefix + "<span class=\"jbool\">" +
+                 (j.get<bool>() ? "true" : "false") + "</span>" + suffix);
   } else if (j.is_null()) {
-    JsonLine(out, indent, prefix + "<span class=\"jnull\">null</span>" + suffix);
+    JsonLine(out, indent,
+             prefix + "<span class=\"jnull\">null</span>" + suffix);
   } else {
     // number (int/float)
     JsonLine(out, indent,
-            prefix + "<span class=\"jnum\">" + j.dump() + "</span>" + suffix);
+             prefix + "<span class=\"jnum\">" + j.dump() + "</span>" + suffix);
   }
 }
 
@@ -661,7 +662,8 @@ std::string Browser::resolveUrl(const std::string &ref) const {
 }
 
 bool Browser::fetchResource(const std::string &absUrl,
-                            std::vector<std::uint8_t> &out) const {
+                            std::vector<std::uint8_t> &out,
+                            std::string *contentType) const {
   // data: URI (e.g. data:image/png;base64,iVBOR...)
   if (absUrl.rfind("data:", 0) == 0) {
     // Format: data:[<mediatype>][;base64],<data>
@@ -702,6 +704,9 @@ bool Browser::fetchResource(const std::string &absUrl,
     std::string resp = Net::Get(absUrl);
     if (resp.empty()) {
       return false;
+    }
+    if (contentType) {
+      *contentType = Net::ExtractContentType(resp);
     }
     std::string body = Net::ExtractBody(resp);
     out.assign(body.begin(), body.end());
@@ -1009,7 +1014,8 @@ bool Browser::navigate(const std::string &url) {
   saveTabState(m_activeTab);
 
   std::vector<std::uint8_t> bytes;
-  if (!fetchResource(target, bytes)) {
+  std::string contentType;
+  if (!fetchResource(target, bytes, &contentType)) {
     m_status = "Failed to load: " + target;
     m_hasDoc = false;
     m_urlText = url;
@@ -1125,6 +1131,24 @@ bool Browser::navigate(const std::string &url) {
     return ok;
   }
 
+  // Check Content-Type header first -- if the server says it's JSON, render as
+  // JSON regardless of the URL extension (e.g. api.php returning JSON).
+  if (contentType == "application/json") {
+    std::string bodyText(reinterpret_cast<const char *>(bytes.data()),
+                         bytes.size());
+    std::string html = resolveJson(bodyText);
+    m_currentHtml = html;
+    if (!isAction && m_activeTab >= 0 &&
+        m_activeTab < static_cast<int>(m_tabHistory.size())) {
+      auto &hist = m_tabHistory[m_activeTab];
+      int idx = m_tabHistoryIndex[m_activeTab];
+      hist.resize(idx + 1);
+      hist.push_back({target, html});
+      m_tabHistoryIndex[m_activeTab] = static_cast<int>(hist.size()) - 1;
+    }
+    return loadHtml(html, target);
+  }
+
   // HTML files are parsed and rendered as documents, not shown as raw text.
   // Extensionless URLs ("/", "/about", ...) have no extension to key off, so we
   // sniff the body and treat it as HTML when it looks like markup.
@@ -1201,6 +1225,7 @@ bool Browser::navigate(const std::string &url) {
   // Check file type configuration for non-video media.
   const FileTypeInfo *ft = LookupFileType(ext);
   if (ft) {
+    DEBUG_LOGF("Type file identified: %s", LogLevel::SUCCESS, ft->label);
     if (ft->inlineDisplay) {
       // For text-like files (md, txt, env, code, etc.), show the raw content
       // with a dark background. For other inline types (images, SVG) this path
@@ -1339,6 +1364,25 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
   }
   m_sheet =
       Css::parse(css, m_lastWidth ? static_cast<float>(m_lastWidth) : 960.0f);
+
+  // Fetch and register @font-face fonts so font-family can resolve to them.
+  // Sources are tried in order; the first that parses as a font wins (a
+  // non-TrueType source such as woff2 fails registerFont and we move on).
+  for (const Css::FontFace &face : m_sheet.fontFaces) {
+    for (const std::string &src : face.sources) {
+      std::string abs = resolveUrl(src);
+      std::vector<std::uint8_t> data;
+      if (fetchResource(abs, data) &&
+          Font::registerFont(face.family, std::move(data))) {
+        DEBUG_LOG("[Browser] Registered @font-face '%s' from %s",
+                  face.family.c_str(), abs.c_str());
+        break;
+      }
+      DEBUG_LOG("[Browser] @font-face '%s' source failed: %s",
+                face.family.c_str(), abs.c_str());
+    }
+  }
+
   m_style = Layout::styleTree(m_doc.root(), m_sheet);
 
   // Preload <img> sources and <video> posters.
@@ -1681,7 +1725,7 @@ void Browser::compositeContent(Paint::Canvas &canvas,
         paintSelection(canvas, runIdx, run);
 
         Font::drawText(canvas, run.tx, static_cast<int>(run.rect.y), run.text,
-                       col, run.fontSize);
+                       col, run.fontSize, run.fontFamily);
       }
     }
   }
@@ -2012,14 +2056,15 @@ const Paint::Color kSelectionBg{0xb3, 0xd7, 0xff, 255};
 // Character index in `text` nearest to page-x `px`, given the run's left edge
 // `tx` and font size. Splits on each glyph's midpoint so the caret snaps to the
 // closer side.
-int CharIndexAtX(const std::string &text, int fontSize, int tx, float px) {
+int CharIndexAtX(const std::string &text, int fontSize,
+                 const std::string &fontFamily, int tx, float px) {
   if (px <= tx) {
     return 0;
   }
   for (size_t i = 1; i <= text.size(); ++i) {
-    int w = Font::textWidth(text.substr(0, i), fontSize);
+    int w = Font::textWidth(text.substr(0, i), fontSize, fontFamily);
     if (tx + w >= px) {
-      int wPrev = Font::textWidth(text.substr(0, i - 1), fontSize);
+      int wPrev = Font::textWidth(text.substr(0, i - 1), fontSize, fontFamily);
       float mid = tx + (wPrev + w) / 2.0f;
       return (px < mid) ? static_cast<int>(i - 1) : static_cast<int>(i);
     }
@@ -2360,10 +2405,12 @@ bool Browser::textRunFor(const Layout::LayoutBox &box, TextRun &out) const {
   }
   const Layout::Rect &c = box.dimensions.content;
   int fontSize = ResolveFontSizeForDomNode(el, m_sheet, TextSizeFor(name));
+  std::string fontFamily =
+      ResolveInheritedPropertyForDomNode(el, "font-family", m_sheet);
   std::string align =
       ToLower(ResolveInheritedPropertyForDomNode(el, "text-align", m_sheet));
   int tx = static_cast<int>(c.x);
-  int textW = Font::textWidth(text, fontSize);
+  int textW = Font::textWidth(text, fontSize, fontFamily);
   if (align == "center") {
     tx += std::max(0, (static_cast<int>(c.width) - textW) / 2);
   } else if (align == "right") {
@@ -2371,11 +2418,12 @@ bool Browser::textRunFor(const Layout::LayoutBox &box, TextRun &out) const {
   }
   out.text = text;
   out.fontSize = fontSize;
+  out.fontFamily = fontFamily;
   out.tx = tx;
   out.rect.x = static_cast<float>(tx);
   out.rect.y = c.y;
   out.rect.width = static_cast<float>(textW);
-  out.rect.height = static_cast<float>(Font::lineHeight(fontSize));
+  out.rect.height = static_cast<float>(Font::lineHeight(fontSize, fontFamily));
   return true;
 }
 
@@ -2420,7 +2468,7 @@ Browser::SelPos Browser::hitTest(const std::vector<TextRun> &runs, float px,
     }
     if (best.run < 0 || dx < bestDx) {
       best.run = static_cast<int>(i);
-      best.ch = CharIndexAtX(r.text, r.fontSize, r.tx, px);
+      best.ch = CharIndexAtX(r.text, r.fontSize, r.fontFamily, r.tx, px);
       bestDx = dx;
     }
   }
@@ -2437,7 +2485,7 @@ Browser::SelPos Browser::hitTest(const std::vector<TextRun> &runs, float px,
     float dy = std::abs(py - cy);
     if (best.run < 0 || dy < bestDy) {
       best.run = static_cast<int>(i);
-      best.ch = CharIndexAtX(r.text, r.fontSize, r.tx, px);
+      best.ch = CharIndexAtX(r.text, r.fontSize, r.fontFamily, r.tx, px);
       bestDy = dy;
     }
   }
@@ -2657,8 +2705,10 @@ void Browser::paintSelection(Paint::Canvas &canvas, int runIdx,
   if (from > to) {
     std::swap(from, to);
   }
-  int x0 = run.tx + Font::textWidth(run.text.substr(0, from), run.fontSize);
-  int x1 = run.tx + Font::textWidth(run.text.substr(0, to), run.fontSize);
+  int x0 = run.tx + Font::textWidth(run.text.substr(0, from), run.fontSize,
+                                    run.fontFamily);
+  int x1 = run.tx + Font::textWidth(run.text.substr(0, to), run.fontSize,
+                                    run.fontFamily);
   FillRect(canvas, x0, static_cast<int>(run.rect.y), std::max(1, x1 - x0),
            static_cast<int>(run.rect.height), kSelectionBg);
 }
@@ -3041,8 +3091,9 @@ string Browser::resolveJson(string data) {
     // Malformed JSON: fall back to the escaped raw text (still safe to
     // embed) plus the parser's own error, one <div> per line, rather than
     // showing a blank page.
-    JsonLine(bodyHtml, 0, "<span class=\"jerr\">Invalid JSON: " +
-                              EscapeHtml(e.what()) + "</span>");
+    JsonLine(bodyHtml, 0,
+             "<span class=\"jerr\">Invalid JSON: " + EscapeHtml(e.what()) +
+                 "</span>");
     std::istringstream lines(data);
     std::string line;
     while (std::getline(lines, line)) {
@@ -3050,19 +3101,19 @@ string Browser::resolveJson(string data) {
     }
   }
   return "<!DOCTYPE html><html><head><meta "
-        "charset=\"utf-8\"><title>JSON</title>"
-        "<style>"
-        "body { margin:0; padding:16px; background-color:#1e1e1e; "
-        "color:#d4d4d4; "
-        "font-family:monospace; font-size:14px; }"
-        "div { white-space:pre; }"
-        ".jkey { color:#9cdcfe; }"
-        ".jstr { color:#ce9178; }"
-        ".jnum { color:#b5cea8; }"
-        ".jbool, .jnull { color:#569cd6; }"
-        ".jerr { color:#f48771; }"
-        "</style></head><body>" +
-        bodyHtml + "</body></html>";
+         "charset=\"utf-8\"><title>JSON</title>"
+         "<style>"
+         "body { margin:0; padding:16px; background-color:#1e1e1e; "
+         "color:#d4d4d4; "
+         "font-family:monospace; font-size:14px; }"
+         "div { white-space:pre; }"
+         ".jkey { color:#9cdcfe; }"
+         ".jstr { color:#ce9178; }"
+         ".jnum { color:#b5cea8; }"
+         ".jbool, .jnull { color:#569cd6; }"
+         ".jerr { color:#f48771; }"
+         "</style></head><body>" +
+         bodyHtml + "</body></html>";
 }
 
 } // namespace Browser

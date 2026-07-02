@@ -211,6 +211,31 @@ TtfState &Ttf() {
   return s;
 }
 
+// Faces registered via registerFont (e.g. @font-face), keyed by the
+// normalized (lower-cased, unquoted) family name.
+std::unordered_map<std::string, TtfState> &Registry() {
+  static std::unordered_map<std::string, TtfState> faces;
+  return faces;
+}
+
+// Initialize `s` from raw font bytes. The stbtt_fontinfo keeps pointers into
+// s.data; moving TtfState afterwards is safe because the vector's heap buffer
+// does not move.
+bool InitTtf(TtfState &s, std::vector<unsigned char> bytes) {
+  if (bytes.empty()) {
+    return false;
+  }
+  s.data = std::move(bytes);
+  int offset = stbtt_GetFontOffsetForIndex(s.data.data(), 0);
+  if (offset < 0 || !stbtt_InitFont(&s.info, s.data.data(), offset)) {
+    s.data.clear();
+    return false;
+  }
+  stbtt_GetFontVMetrics(&s.info, &s.ascent, &s.descent, &s.lineGap);
+  s.loaded = true;
+  return true;
+}
+
 bool TryLoad(const std::string &path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -218,20 +243,24 @@ bool TryLoad(const std::string &path) {
   }
   std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)),
                                    std::istreambuf_iterator<char>());
-  if (bytes.empty()) {
-    return false;
+  return InitTtf(Ttf(), std::move(bytes));
+}
+
+// Lower-case, trim, and strip one layer of quotes from a family name.
+std::string NormalizeFamily(const std::string &raw) {
+  size_t b = raw.find_first_not_of(" \t\r\n");
+  size_t e = raw.find_last_not_of(" \t\r\n");
+  if (b == std::string::npos) {
+    return "";
   }
-  TtfState &s = Ttf();
-  s.data = std::move(bytes);
-  int offset = stbtt_GetFontOffsetForIndex(s.data.data(), 0);
-  if (offset < 0 ||
-      !stbtt_InitFont(&s.info, s.data.data(), offset)) {
-    s.data.clear();
-    return false;
+  std::string name = raw.substr(b, e - b + 1);
+  if (name.size() >= 2 && (name.front() == '"' || name.front() == '\'') &&
+      name.back() == name.front()) {
+    name = name.substr(1, name.size() - 2);
   }
-  stbtt_GetFontVMetrics(&s.info, &s.ascent, &s.descent, &s.lineGap);
-  s.loaded = true;
-  return true;
+  std::transform(name.begin(), name.end(), name.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return name;
 }
 
 // Pick a font file from a directory, preferring names containing "misans" then
@@ -285,13 +314,42 @@ void EnsureInit() {
       return;
     }
   }
-  for (const char *dir : {"assets/fonts", "../assets/fonts",
-                          "../../assets/fonts"}) {
+  for (const char *dir :
+       {"assets/fonts", "../assets/fonts", "../../assets/fonts"}) {
     std::string path = PickFontIn(dir);
     if (!path.empty() && TryLoad(path)) {
       return;
     }
   }
+}
+
+// Resolve a CSS font-family list to a face: the first comma-separated name
+// with a registered face wins; otherwise the default face, or nullptr when
+// only the bitmap fallback is available.
+const TtfState *FaceFor(const std::string &fontFamily) {
+  if (!fontFamily.empty()) {
+    auto &faces = Registry();
+    size_t start = 0;
+    while (start <= fontFamily.size()) {
+      size_t comma = fontFamily.find(',', start);
+      size_t len =
+          (comma == std::string::npos) ? std::string::npos : comma - start;
+      std::string name = NormalizeFamily(fontFamily.substr(start, len));
+      if (!name.empty()) {
+        auto it = faces.find(name);
+        if (it != faces.end() && it->second.loaded) {
+          return &it->second;
+        }
+      }
+      if (comma == std::string::npos) {
+        break;
+      }
+      start = comma + 1;
+    }
+  }
+  EnsureInit();
+  TtfState &s = Ttf();
+  return s.loaded ? &s : nullptr;
 }
 
 } // namespace
@@ -302,23 +360,38 @@ bool loadFont(const std::string &path) {
   return TryLoad(path);
 }
 
+bool registerFont(const std::string &family, std::vector<unsigned char> data) {
+  std::string name = NormalizeFamily(family);
+  if (name.empty()) {
+    return false;
+  }
+  TtfState s;
+  if (!InitTtf(s, std::move(data))) {
+    return false;
+  }
+  Registry()[name] = std::move(s);
+  return true;
+}
+
 bool usingTrueType() {
   EnsureInit();
   return Ttf().loaded;
 }
 
 int drawText(Paint::Canvas &canvas, int x, int y, const std::string &text,
-             Paint::Color color, int pixelHeight) {
+             Paint::Color color, int pixelHeight,
+             const std::string &fontFamily) {
   if (pixelHeight < 1) {
     pixelHeight = 1;
   }
-  EnsureInit();
-  TtfState &s = Ttf();
-  if (!s.loaded) {
+  const TtfState *face = FaceFor(fontFamily);
+  if (!face) {
     return BitmapDraw(canvas, x, y, text, color, BmpScale(pixelHeight));
   }
+  const TtfState &s = *face;
 
-  float scale = stbtt_ScaleForPixelHeight(&s.info, static_cast<float>(pixelHeight));
+  float scale =
+      stbtt_ScaleForPixelHeight(&s.info, static_cast<float>(pixelHeight));
   int baseline = y + static_cast<int>(std::lround(s.ascent * scale));
   float penX = static_cast<float>(x);
 
@@ -329,8 +402,8 @@ int drawText(Paint::Canvas &canvas, int x, int y, const std::string &text,
       penX += stbtt_GetCodepointKernAdvance(&s.info, prev, cp) * scale;
     }
     int gw = 0, gh = 0, xoff = 0, yoff = 0;
-    unsigned char *bmp = stbtt_GetCodepointBitmap(&s.info, scale, scale, cp, &gw,
-                                                  &gh, &xoff, &yoff);
+    unsigned char *bmp = stbtt_GetCodepointBitmap(&s.info, scale, scale, cp,
+                                                  &gw, &gh, &xoff, &yoff);
     if (bmp) {
       int gx = static_cast<int>(std::lround(penX)) + xoff;
       int gy = baseline + yoff;
@@ -354,16 +427,18 @@ int drawText(Paint::Canvas &canvas, int x, int y, const std::string &text,
   return static_cast<int>(std::lround(penX)) - x;
 }
 
-int textWidth(const std::string &text, int pixelHeight) {
+int textWidth(const std::string &text, int pixelHeight,
+              const std::string &fontFamily) {
   if (pixelHeight < 1) {
     pixelHeight = 1;
   }
-  EnsureInit();
-  TtfState &s = Ttf();
-  if (!s.loaded) {
+  const TtfState *face = FaceFor(fontFamily);
+  if (!face) {
     return static_cast<int>(text.size()) * kBmpCellW * BmpScale(pixelHeight);
   }
-  float scale = stbtt_ScaleForPixelHeight(&s.info, static_cast<float>(pixelHeight));
+  const TtfState &s = *face;
+  float scale =
+      stbtt_ScaleForPixelHeight(&s.info, static_cast<float>(pixelHeight));
   float w = 0;
   int prev = 0;
   for (int cp : DecodeUtf8(text)) {
@@ -378,16 +453,17 @@ int textWidth(const std::string &text, int pixelHeight) {
   return static_cast<int>(std::lround(w));
 }
 
-int lineHeight(int pixelHeight) {
+int lineHeight(int pixelHeight, const std::string &fontFamily) {
   if (pixelHeight < 1) {
     pixelHeight = 1;
   }
-  EnsureInit();
-  TtfState &s = Ttf();
-  if (!s.loaded) {
+  const TtfState *face = FaceFor(fontFamily);
+  if (!face) {
     return kBmpCellH * BmpScale(pixelHeight);
   }
-  float scale = stbtt_ScaleForPixelHeight(&s.info, static_cast<float>(pixelHeight));
+  const TtfState &s = *face;
+  float scale =
+      stbtt_ScaleForPixelHeight(&s.info, static_cast<float>(pixelHeight));
   return static_cast<int>(
       std::lround((s.ascent - s.descent + s.lineGap) * scale));
 }

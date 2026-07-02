@@ -153,17 +153,37 @@ int HttpStatusCode(const std::string &raw) {
 // fetch() API, even though the body is already fully in memory by the time
 // this is built -- so `await (await fetch(url)).json()` works the same way
 // it would in a real browser.
-JsValue makeFetchResponse(JsEngine *eng, int status, const std::string &body) {
+JsValue makeFetchResponse(JsEngine *eng, int status, const std::string &body,
+                          const std::string &contentType = "") {
   JsValue res(ValueType::Object);
   res.setProperty("status", JsValue(static_cast<double>(status)));
   res.setProperty("ok", JsValue(status >= 200 && status < 300));
-  res.setProperty(
-      "text", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                  [body, eng](const std::vector<JsValue> &) {
-                    JsValue p = eng->makePromise();
-                    eng->resolvePromiseObj(p.objVal, JsValue(body));
-                    return p;
-                  })));
+
+  // Expose Content-Type so JS can check response.headers.get('content-type')
+  JsValue headersObj(ValueType::Object);
+  headersObj.setProperty(
+      "get",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [contentType](const std::vector<JsValue> &a) -> JsValue {
+            if (a.empty() || a[0].type != ValueType::String) {
+              return JsValue();
+            }
+            std::string name = a[0].stringVal;
+            std::transform(name.begin(), name.end(), name.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (name == "content-type") {
+              return JsValue(contentType);
+            }
+            return JsValue();
+          })));
+  res.setProperty("headers", headersObj);
+  res.setProperty("text",
+                  JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                      [body, eng](const std::vector<JsValue> &) {
+                        JsValue p = eng->makePromise();
+                        eng->resolvePromiseObj(p.objVal, JsValue(body));
+                        return p;
+                      })));
   res.setProperty(
       "json", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
                   [body, eng](const std::vector<JsValue> &) {
@@ -173,9 +193,9 @@ JsValue makeFetchResponse(JsEngine *eng, int status, const std::string &body) {
                           p.objVal, JsonToJsValue(nlohmann::json::parse(body)));
                     } catch (const nlohmann::json::parse_error &e) {
                       eng->rejectPromiseObj(
-                          p.objVal, JsValue(std::string(
-                                        "invalid JSON in response: ") +
-                                        e.what()));
+                          p.objVal,
+                          JsValue(std::string("invalid JSON in response: ") +
+                                  e.what()));
                     }
                     return p;
                   })));
@@ -190,26 +210,23 @@ JsValue makeDateInstance(double epochMs) {
   JsValue d(ValueType::Object);
 
   auto bind0 = [&](const char *name, double value) {
-    d.setProperty(name,
-                  JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                      [value](const std::vector<JsValue> &) {
-                        return JsValue(value);
-                      })));
+    d.setProperty(
+        name,
+        JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+            [value](const std::vector<JsValue> &) { return JsValue(value); })));
   };
   auto bindStr = [&](const char *name, const std::string &value) {
-    d.setProperty(name,
-                  JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                      [value](const std::vector<JsValue> &) {
-                        return JsValue(value);
-                      })));
+    d.setProperty(
+        name,
+        JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+            [value](const std::vector<JsValue> &) { return JsValue(value); })));
   };
 
   bind0("getTime", epochMs);
   bind0("valueOf", epochMs);
 
   std::time_t secs = static_cast<std::time_t>(epochMs / 1000.0);
-  int millis =
-      static_cast<int>(epochMs - static_cast<double>(secs) * 1000.0);
+  int millis = static_cast<int>(epochMs - static_cast<double>(secs) * 1000.0);
   if (millis < 0) {
     millis += 1000; // negative epochMs (pre-1970): keep millis in [0,1000)
   }
@@ -231,8 +248,8 @@ JsValue makeDateInstance(double epochMs) {
     h12 = 12;
   }
   std::ostringstream ts;
-  ts << h12 << ":" << std::setfill('0') << std::setw(2) << local.tm_min
-     << ":" << std::setfill('0') << std::setw(2) << local.tm_sec << " "
+  ts << h12 << ":" << std::setfill('0') << std::setw(2) << local.tm_min << ":"
+     << std::setfill('0') << std::setw(2) << local.tm_sec << " "
      << (local.tm_hour < 12 ? "AM" : "PM");
   bindStr("toLocaleTimeString", ts.str());
 
@@ -247,10 +264,10 @@ JsValue makeDateInstance(double epochMs) {
   // uses UTC rather than local time, matching the real Date API.
   std::ostringstream iso;
   iso << std::setfill('0') << std::setw(4) << (utc.tm_year + 1900) << "-"
-      << std::setw(2) << (utc.tm_mon + 1) << "-" << std::setw(2)
-      << utc.tm_mday << "T" << std::setw(2) << utc.tm_hour << ":"
-      << std::setw(2) << utc.tm_min << ":" << std::setw(2) << utc.tm_sec
-      << "." << std::setw(3) << millis << "Z";
+      << std::setw(2) << (utc.tm_mon + 1) << "-" << std::setw(2) << utc.tm_mday
+      << "T" << std::setw(2) << utc.tm_hour << ":" << std::setw(2) << utc.tm_min
+      << ":" << std::setw(2) << utc.tm_sec << "." << std::setw(3) << millis
+      << "Z";
   bindStr("toISOString", iso.str());
   bindStr("toString", iso.str());
 
@@ -545,29 +562,28 @@ void JsEngine::initBuiltins() {
   // ---- JSON -------------------------------------------------------------
   JsValue jsonObj(ValueType::Object);
   jsonObj.setProperty(
-      "parse", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
-                   [](const std::vector<JsValue> &a) -> JsValue {
-                     if (a.empty()) {
-                       return JsValue();
-                     }
-                     try {
-                       return JsonToJsValue(
-                           nlohmann::json::parse(a[0].toString()));
-                     } catch (const nlohmann::json::parse_error &) {
-                       return JsValue(); // invalid JSON -> undefined (this
-                                         // engine has no throw to raise
-                                         // SyntaxError with instead)
-                     }
-                   })));
-  jsonObj.setProperty(
-      "stringify",
+      "parse",
       JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
           [](const std::vector<JsValue> &a) -> JsValue {
             if (a.empty()) {
               return JsValue();
             }
-            return JsValue(JsValueToJson(a[0]).dump());
+            try {
+              return JsonToJsValue(nlohmann::json::parse(a[0].toString()));
+            } catch (const nlohmann::json::parse_error &) {
+              return JsValue(); // invalid JSON -> undefined (this
+                                // engine has no throw to raise
+                                // SyntaxError with instead)
+            }
           })));
+  jsonObj.setProperty(
+      "stringify", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                       [](const std::vector<JsValue> &a) -> JsValue {
+                         if (a.empty()) {
+                           return JsValue();
+                         }
+                         return JsValue(JsValueToJson(a[0]).dump());
+                       })));
   m_globalEnv->set("JSON", jsonObj);
 
   // ---- fetch --------------------------------------------------------------
@@ -623,13 +639,15 @@ void JsEngine::initBuiltins() {
             if (raw.empty()) {
               rejectPromiseObj(
                   promise.objVal,
-                  JsValue(std::string("fetch: network error requesting ") + url));
+                  JsValue(std::string("fetch: network error requesting ") +
+                          url));
               return promise;
             }
 
             resolvePromiseObj(promise.objVal,
                               makeFetchResponse(this, HttpStatusCode(raw),
-                                                Net::ExtractBody(raw)));
+                                                Net::ExtractBody(raw),
+                                                Net::ExtractContentType(raw)));
             return promise;
           })));
 

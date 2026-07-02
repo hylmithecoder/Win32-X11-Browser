@@ -70,6 +70,10 @@ struct LayoutBox {
   // the tree. Used to size text instead of re-deriving inheritance per box.
   int fontSize = 16;
 
+  // Effective (inherited) CSS font-family list, resolved top-down like
+  // fontSize. Empty selects the default face.
+  std::string fontFamily;
+
   // Resolved, whitespace-collapsed text for an anonymous text-run leaf (a
   // bare DOM text node interleaved with element siblings, e.g. "Click " in
   // "Click <a>here</a>"). Empty for every other box; element leaves still

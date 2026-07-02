@@ -341,9 +341,9 @@ PerformRequest(const std::string &method, const std::string &url,
     std::string response;
     size_t total = 0;
     while (total < req_str.size()) {
-      int n = static_cast<int>(send(sock, req_str.data() + total,
-                                    static_cast<int>(req_str.size() - total),
-                                    0));
+      int n =
+          static_cast<int>(send(sock, req_str.data() + total,
+                                static_cast<int>(req_str.size() - total), 0));
       if (n <= 0) {
         std::cerr << "Failed to send HTTP request." << std::endl;
         CLOSE_SOCKET(sock);
@@ -521,6 +521,47 @@ std::string ExtractBody(const std::string &response) {
     }
   }
   return body;
+}
+
+std::string ExtractContentType(const std::string &response) {
+  size_t delimiter = response.find("\r\n\r\n");
+  if (delimiter == std::string::npos) {
+    return "";
+  }
+  std::string headers = response.substr(0, delimiter);
+
+  std::string lowerHeaders = headers;
+  std::transform(lowerHeaders.begin(), lowerHeaders.end(), lowerHeaders.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  size_t ct = lowerHeaders.find("content-type:");
+  if (ct == std::string::npos) {
+    return "";
+  }
+  size_t valueStart = ct + 13; // length of "content-type:"
+  size_t valueEnd = headers.find("\r\n", valueStart);
+  if (valueEnd == std::string::npos) {
+    valueEnd = headers.size();
+  }
+  std::string value = headers.substr(valueStart, valueEnd - valueStart);
+
+  // Trim whitespace and extract only the media type (before ';' params)
+  size_t start = value.find_first_not_of(" \t");
+  if (start == std::string::npos) {
+    return "";
+  }
+  size_t semi = value.find(';', start);
+  std::string mediaType = value.substr(
+      start, (semi == std::string::npos ? value.size() : semi) - start);
+  size_t end = mediaType.find_last_not_of(" \t");
+  if (end != std::string::npos) {
+    mediaType = mediaType.substr(0, end + 1);
+  }
+
+  // Lowercase for easy comparison
+  std::transform(mediaType.begin(), mediaType.end(), mediaType.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return mediaType;
 }
 
 } // namespace Net

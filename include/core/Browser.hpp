@@ -111,7 +111,8 @@ private:
   void drawTabBar(Paint::Canvas &canvas, int width);
 
   string resolveUrl(const string &ref) const;
-  bool fetchResource(const string &absUrl, vector<uint8_t> &out) const;
+  bool fetchResource(const string &absUrl, vector<uint8_t> &out,
+                     string *contentType = nullptr) const;
   string generatePdfHtml(const string &target);
   float getPageYOffset(int pageNum) const;
   void updatePdfCurrentPageOnScroll();
@@ -130,6 +131,7 @@ private:
     Layout::Rect rect;
     string text;
     int fontSize = 16;
+    string fontFamily; // inherited CSS font-family list; "" = default face
     int tx = 0;
   };
   struct SelPos {

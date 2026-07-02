@@ -91,10 +91,18 @@ struct Rule {
   std::vector<Declaration> declarations;
 };
 
+// One @font-face rule: the family name it defines and its src url()s in
+// source order. The loader tries each source until one parses as a font.
+struct FontFace {
+  std::string family;               // unquoted family name
+  std::vector<std::string> sources; // url(...) references, escapes resolved
+};
+
 // A parsed stylesheet: an ordered list of rules. Source order is preserved and
 // used to break specificity ties during the cascade.
 struct Stylesheet {
   std::vector<Rule> rules;
+  std::vector<FontFace> fontFaces; // @font-face rules, in source order
 };
 
 // Parse CSS text into a Stylesheet. Tolerant of malformed input: comments are

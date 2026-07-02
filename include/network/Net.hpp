@@ -48,6 +48,10 @@ std::string Delete(const std::string &url);
 // returned unchanged.
 std::string ExtractBody(const std::string &response);
 
+// Extract the Content-Type header value from a raw HTTP response. Returns an
+// empty string if the header is not present.
+std::string ExtractContentType(const std::string &response);
+
 } // namespace Net
 } // namespace DesktopWebview
 
