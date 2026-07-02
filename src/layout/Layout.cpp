@@ -256,13 +256,25 @@ void TrimInlineEdges(std::vector<LayoutBox> &list) {
 }
 
 LayoutBox BuildLayoutTree(const StyledNode &sn, int inheritedFontSize,
-                          const std::string &inheritedFontFamily) {
+                          const std::string &inheritedFontFamily,
+                          const std::string &inheritedWhiteSpace = "normal") {
   LayoutBox box;
   box.node = &sn;
   box.fontSize = ResolveOwnFontSize(sn, inheritedFontSize);
   box.fontFamily = ResolveOwnFontFamily(sn, inheritedFontFamily);
+  // Resolve the effective white-space for this node: explicit style wins,
+  // else inherit from parent. Values "pre", "pre-wrap", "pre-line" all
+  // preserve newlines; only "normal" and "nowrap" collapse them.
+  std::string ws = inheritedWhiteSpace;
+  auto wsIt = sn.styles.find("white-space");
+  if (wsIt != sn.styles.end() && !wsIt->second.empty()) {
+    ws = wsIt->second;
+  }
+  bool preserveWhitespace =
+      (ws == "pre" || ws == "pre-wrap" || ws == "pre-line");
   if (sn.node.isText()) {
-    box.text = CollapseInlineWhitespace(sn.node.text());
+    box.text = preserveWhitespace ? sn.node.text()
+                                  : CollapseInlineWhitespace(sn.node.text());
   }
   std::string disp = sn.display();
   box.type = (disp == "inline" || disp == "inline-block") ? BoxType::Inline
@@ -282,20 +294,20 @@ LayoutBox BuildLayoutTree(const StyledNode &sn, int inheritedFontSize,
         }
         if (gd == "inline" || gd == "inline-block") {
           InlineContainer(box).children.push_back(
-              BuildLayoutTree(gc, box.fontSize, box.fontFamily));
+              BuildLayoutTree(gc, box.fontSize, box.fontFamily, ws));
         } else {
           box.children.push_back(
-              BuildLayoutTree(gc, box.fontSize, box.fontFamily));
+              BuildLayoutTree(gc, box.fontSize, box.fontFamily, ws));
         }
       }
       continue;
     }
     if (childDisp == "inline" || childDisp == "inline-block") {
       InlineContainer(box).children.push_back(
-          BuildLayoutTree(child, box.fontSize, box.fontFamily));
+          BuildLayoutTree(child, box.fontSize, box.fontFamily, ws));
     } else {
       box.children.push_back(
-          BuildLayoutTree(child, box.fontSize, box.fontFamily));
+          BuildLayoutTree(child, box.fontSize, box.fontFamily, ws));
     }
   }
 
@@ -576,6 +588,38 @@ std::string ResolveOwnFontFamily(const StyledNode &sn,
   return it->second;
 }
 
+// Count the number of lines in text (newlines + 1). A trailing newline does
+// not add an extra line, matching real-browser <pre> behaviour.
+int CountLines(const std::string &text) {
+  int lines = 1;
+  for (char c : text) {
+    if (c == '\n') {
+      ++lines;
+    }
+  }
+  // A trailing newline means the last line is empty and not visible.
+  if (!text.empty() && text.back() == '\n') {
+    --lines;
+  }
+  return std::max(1, lines);
+}
+
+// Return the width of the widest line in a multiline text block.
+float MaxLineWidth(const std::string &text, int fontSize,
+                   const std::string &fontFamily) {
+  float maxW = 0;
+  size_t start = 0;
+  for (size_t i = 0; i <= text.size(); ++i) {
+    if (i == text.size() || text[i] == '\n') {
+      std::string line = text.substr(start, i - start);
+      float w = static_cast<float>(Font::textWidth(line, fontSize, fontFamily));
+      maxW = std::max(maxW, w);
+      start = i + 1;
+    }
+  }
+  return maxW;
+}
+
 void CalculateInlineWidth(LayoutBox &box, const Dimensions &containing);
 
 void CalculateInlineWidth(LayoutBox &box, const Dimensions &containing) {
@@ -609,7 +653,14 @@ void CalculateInlineWidth(LayoutBox &box, const Dimensions &containing) {
                                ? box.text
                                : CollapseWhitespace(box.node->node.text());
         int fontSize = GetFontSizeForBox(box);
-        w = static_cast<float>(Font::textWidth(text, fontSize, box.fontFamily));
+        // For text with newlines (white-space: pre/pre-wrap), measure the
+        // widest line rather than the whole text as a single run.
+        if (text.find('\n') != std::string::npos) {
+          w = MaxLineWidth(text, fontSize, box.fontFamily);
+        } else {
+          w = static_cast<float>(
+              Font::textWidth(text, fontSize, box.fontFamily));
+        }
 
         // Form controls are replaced elements; their intrinsic width comes from
         // the Elements module (the single source of truth for control sizing).
@@ -663,7 +714,14 @@ void CalculateInlineHeight(LayoutBox &box) {
         h = 0;
       } else {
         int fontSize = GetFontSizeForBox(box);
-        h = static_cast<float>(Font::lineHeight(fontSize, box.fontFamily));
+        // For text with newlines (white-space: pre/pre-wrap), height is
+        // lineHeight * numberOfLines rather than a single line.
+        std::string text =
+            box.node->node.isText() ? box.text : box.node->node.text();
+        int lines =
+            (text.find('\n') != std::string::npos) ? CountLines(text) : 1;
+        h = static_cast<float>(Font::lineHeight(fontSize, box.fontFamily) *
+                               lines);
 
         if (Elements::isFormControl(box.node->node)) {
           h = static_cast<float>(

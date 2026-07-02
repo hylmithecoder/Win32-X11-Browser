@@ -384,6 +384,26 @@ int drawText(Paint::Canvas &canvas, int x, int y, const std::string &text,
   if (pixelHeight < 1) {
     pixelHeight = 1;
   }
+  // Handle newlines: draw each line separately, advancing y by lineHeight.
+  if (text.find('\n') != std::string::npos) {
+    int totalWidth = 0;
+    int lineH = lineHeight(pixelHeight, fontFamily);
+    int curY = y;
+    size_t start = 0;
+    for (size_t i = 0; i <= text.size(); ++i) {
+      if (i == text.size() || text[i] == '\n') {
+        std::string line = text.substr(start, i - start);
+        if (!line.empty()) {
+          int w =
+              drawText(canvas, x, curY, line, color, pixelHeight, fontFamily);
+          totalWidth = std::max(totalWidth, w);
+        }
+        curY += lineH;
+        start = i + 1;
+      }
+    }
+    return totalWidth;
+  }
   const TtfState *face = FaceFor(fontFamily);
   if (!face) {
     return BitmapDraw(canvas, x, y, text, color, BmpScale(pixelHeight));
@@ -418,6 +438,23 @@ int drawText(Paint::Canvas &canvas, int x, int y, const std::string &text,
         }
       }
       stbtt_FreeBitmap(bmp, nullptr);
+    } else if (cp >= 0x10000 || (cp >= 0x2600 && cp <= 0x27BF) ||
+               (cp >= 0x1F300 && cp <= 0x1FFFF)) {
+      // Emoji / special symbol fallback: draw a small square placeholder
+      // so the user sees *something* rather than invisible characters.
+      int sz = std::max(2, static_cast<int>(std::lround(pixelHeight * 0.6f)));
+      int gx = static_cast<int>(std::lround(penX));
+      int gy = baseline - sz;
+      Paint::Color c = color;
+      c.a = static_cast<std::uint8_t>(c.a * 180 / 255);
+      for (int j = 0; j < sz; ++j) {
+        for (int i = 0; i < sz; ++i) {
+          // Draw a small filled square with a 1px border
+          if (i == 0 || i == sz - 1 || j == 0 || j == sz - 1) {
+            canvas.blendPixel(gx + i, gy + j, c);
+          }
+        }
+      }
     }
     int adv = 0, lsb = 0;
     stbtt_GetCodepointHMetrics(&s.info, cp, &adv, &lsb);

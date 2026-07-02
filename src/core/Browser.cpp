@@ -2431,7 +2431,31 @@ void Browser::collectTextRuns(const Layout::LayoutBox &box,
                               std::vector<TextRun> &runs) const {
   TextRun run;
   if (textRunFor(box, run)) {
-    runs.push_back(run);
+    // For multiline text (white-space: pre/pre-wrap), split into separate
+    // TextRuns per line so that selection and hit-testing work correctly.
+    if (run.text.find('\n') != std::string::npos) {
+      int lineH = Font::lineHeight(run.fontSize, run.fontFamily);
+      int curY = static_cast<int>(run.rect.y);
+      size_t start = 0;
+      for (size_t i = 0; i <= run.text.size(); ++i) {
+        if (i == run.text.size() || run.text[i] == '\n') {
+          std::string line = run.text.substr(start, i - start);
+          if (!line.empty()) {
+            TextRun lr = run;
+            lr.text = line;
+            lr.rect.y = static_cast<float>(curY);
+            lr.rect.width = static_cast<float>(
+                Font::textWidth(line, run.fontSize, run.fontFamily));
+            lr.tx = run.tx;
+            runs.push_back(lr);
+          }
+          curY += lineH;
+          start = i + 1;
+        }
+      }
+    } else {
+      runs.push_back(run);
+    }
   }
   for (const Layout::LayoutBox &child : box.children) {
     collectTextRuns(child, runs);
