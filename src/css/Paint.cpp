@@ -353,8 +353,31 @@ float BorderRadius(const Layout::LayoutBox &box) {
   return std::min(r, maxR);
 }
 
+// True for <input>/<textarea>/<select>/<button>: form controls the Elements
+// module paints itself (native widget chrome, or the equivalent read from
+// CSS -- see Elements::paint), covering only their content rect. If the
+// generic box painting below also filled their background/border across the
+// full border-box, the two paints would visibly conflict: whatever this
+// function paints shows through as a ring around the smaller area
+// Elements::paint actually covers (padding/border are never repainted).
+bool IsFormControlBox(const Layout::LayoutBox &box) {
+  if (!box.node || !box.node->node.isElement()) {
+    return false;
+  }
+  std::string name = ToLower(box.node->node.name());
+  return name == "input" || name == "textarea" || name == "select" ||
+        name == "button";
+}
+
 void PaintBox(const Layout::LayoutBox &box, DisplayList &out) {
   const Layout::Dimensions &d = box.dimensions;
+
+  if (IsFormControlBox(box)) {
+    for (const Layout::LayoutBox &child : box.children) {
+      PaintBox(child, out);
+    }
+    return;
+  }
 
   Color bg;
   bool hasBg = BackgroundColor(box, bg);

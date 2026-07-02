@@ -118,6 +118,50 @@ std::string EscapeHtml(const std::string &text) {
   return escaped;
 }
 
+// The colour that should fill the whole page canvas: <html>'s own background
+// if it set one, else <body>'s (real browsers propagate body's background to
+// the viewport when html doesn't declare one -- CSS Backgrounds §2.11), else
+// `fallback`. Reuses the already-cascaded (var()-resolved) StyledNode tree
+// Layout::styleTree built rather than a fresh cascade lookup. Without this, a
+// page's background only fills <html>/<body>'s own (content-height) box, and
+// the rest of a viewport taller than the content shows the raw canvas colour
+// instead -- visibly wrong for any page with a coloured background shorter
+// than the window.
+Paint::Color ResolveCanvasBackground(const Layout::StyledNode &html,
+                                     Paint::Color fallback) {
+  auto tryColor = [](const std::map<std::string, std::string> &styles,
+                     Paint::Color &out) -> bool {
+    auto it = styles.find("background-color");
+    if (it != styles.end() && Paint::parseColor(it->second, out)) {
+      return true;
+    }
+    it = styles.find("background");
+    if (it != styles.end()) {
+      std::istringstream ss(it->second);
+      std::string tok;
+      while (ss >> tok) {
+        if (Paint::parseColor(tok, out)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  Paint::Color c;
+  if (tryColor(html.styles, c)) {
+    return c;
+  }
+  for (const Layout::StyledNode &child : html.children) {
+    if (child.node.isElement() && ToLower(child.node.name()) == "body") {
+      if (tryColor(child.styles, c)) {
+        return c;
+      }
+      break;
+    }
+  }
+  return fallback;
+}
+
 // Emit one rendered JSON line as its own <div> (a block box, so it reliably
 // stacks vertically) rather than relying on a <pre> + literal "\n": this
 // engine's inline text layout always collapses runs of whitespace regardless
@@ -1374,6 +1418,20 @@ bool Browser::loadHtml(const std::string &html, const std::string &baseUrl) {
     Wrapper::Node el = m_doc.getElementById(id);
     return el ? el.text() : "";
   };
+  dom.getElementAttribute = [&](const std::string &id,
+                                const std::string &attr) -> std::string {
+    Wrapper::Node el = m_doc.getElementById(id);
+    return el ? el.attribute(attr) : "";
+  };
+  dom.setElementAttribute = [&](const std::string &id, const std::string &attr,
+                                const std::string &value) {
+    Wrapper::Node el = m_doc.getElementById(id);
+    if (el) {
+      el.setAttribute(attr, value);
+      m_style = Layout::styleTree(m_doc.root(), m_sheet);
+      annotateSizes(m_style);
+    }
+  };
 
   // m_jsEngine (not a local) so the page's listeners, timers, and Promise
   // state stay alive after loadHtml returns -- handleClick/render trigger and
@@ -1599,10 +1657,13 @@ void Browser::compositeContent(Paint::Canvas &canvas,
         DrawPlayTriangle(canvas, c, kWhite);
       }
     } else if (Elements::isFormControl(el)) {
-      // Native form-control rendering lives in the Elements module.
+      // Form-control rendering lives in the Elements module; box.node->styles
+      // is the same already-cascaded (var()-resolved) style map used
+      // everywhere else, so a control's CSS styling is honoured consistently
+      // with how it would be for any other box.
       int px = ResolveFontSizeForDomNode(el, m_sheet, 16);
       bool focused = m_focusedNode.valid() && m_focusedNode.raw() == el.raw();
-      Elements::paint(canvas, el, c, px, focused);
+      Elements::paint(canvas, el, c, px, focused, box.node->styles);
     } else if (box.children.empty()) {
       TextRun run;
       if (textRunFor(box, run)) {
@@ -1636,13 +1697,20 @@ void Browser::compositeContent(Paint::Canvas &canvas,
 
 Paint::Canvas Browser::renderPage(int width, int height) {
   Paint::Canvas page(width, std::max(1, height));
-  page.clear(kWhite);
 
   if (!m_hasDoc) {
+    page.clear(kWhite);
     Font::drawText(page, 8, 8, m_status.empty() ? "No page loaded" : m_status,
                    kBlack, 18);
     return page;
   }
+
+  // `height` here is already max(viewport height, content height) (see
+  // Browser::render's pageCanvasH), so clearing the full canvas to the
+  // resolved html/body background -- rather than a hardcoded white -- makes
+  // that colour cover the whole page even where content falls short of the
+  // viewport, matching how a real browser paints the canvas.
+  page.clear(ResolveCanvasBackground(m_style, kWhite));
 
   Layout::LayoutBox box = Layout::layout(m_style, static_cast<float>(width),
                                          static_cast<float>(height));

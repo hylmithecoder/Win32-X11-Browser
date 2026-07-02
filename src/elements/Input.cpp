@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
 
 namespace DesktopWebview {
 namespace Elements {
@@ -154,6 +155,80 @@ void Checkmark(Paint::Canvas &c, int x, int y, int w, int h, Paint::Color col) {
       y3 = y + static_cast<int>(h * 0.28f);
   ThickLine(c, x1, y1, x2, y2, t, col);
   ThickLine(c, x2, y2, x3, y3, t, col);
+}
+
+// --- CSS-aware colour/radius resolution, with a native-look fallback ------
+// Mirrors Paint.cpp's BackgroundColor/BorderColor/BorderRadius (which this
+// module cannot call directly -- they are file-local to Paint.cpp, and the
+// generic box painter now skips form controls entirely, see
+// Paint.cpp's IsFormControlBox) so a page's own styling, or a ua.css
+// default, wins exactly the same way it would for any other box.
+
+// `longhand` (e.g. "background-color"), else the first colour token in
+// `shorthand`'s value (e.g. "background"/"border"), else `fallback`.
+Paint::Color ResolveColor(const std::map<std::string, std::string> &style,
+                          const std::string &longhand,
+                          const std::string &shorthand,
+                          Paint::Color fallback) {
+  auto it = style.find(longhand);
+  Paint::Color c;
+  if (it != style.end() && Paint::parseColor(it->second, c)) {
+    return c;
+  }
+  it = style.find(shorthand);
+  if (it != style.end()) {
+    std::istringstream ss(it->second);
+    std::string tok;
+    while (ss >> tok) {
+      if (Paint::parseColor(tok, c)) {
+        return c;
+      }
+    }
+  }
+  return fallback;
+}
+
+// First numeric token of "border-radius", clamped to half of `maxDim`, or 0
+// if unset/unparseable. MVP scope: one uniform radius, matching Paint.cpp's
+// BorderRadius.
+float ResolveRadius(const std::map<std::string, std::string> &style,
+                    float maxDim) {
+  auto it = style.find("border-radius");
+  if (it == style.end()) {
+    return 0.0f;
+  }
+  std::istringstream ss(it->second);
+  std::string tok;
+  while (ss >> tok) {
+    char *end = nullptr;
+    double v = std::strtod(tok.c_str(), &end);
+    if (end != tok.c_str() && v > 0) {
+      return std::min(static_cast<float>(v), maxDim / 2.0f);
+    }
+  }
+  return 0.0f;
+}
+
+// Fill+stroke a box, respecting a rounded radius. A radius>0 border is drawn
+// as two nested rounded fills (border-box in the border colour, then a
+// 1px-inset fill in the background colour on top) -- the same technique
+// Paint.cpp's PaintBox uses, so a control's rounded border renders
+// consistently with how border-radius renders on any other element.
+void PaintRoundedBox(Paint::Canvas &c, const Layout::Rect &rect, float radius,
+                     Paint::Color bg, Paint::Color border) {
+  if (radius > 0) {
+    c.fillRoundedRect(rect, radius, border);
+    Layout::Rect inner{rect.x + 1, rect.y + 1,
+                       std::max(0.0f, rect.width - 2),
+                       std::max(0.0f, rect.height - 2)};
+    c.fillRoundedRect(inner, std::max(0.0f, radius - 1), bg);
+  } else {
+    FillRect(c, static_cast<int>(rect.x), static_cast<int>(rect.y),
+            static_cast<int>(rect.width), static_cast<int>(rect.height), bg);
+    StrokeRect(c, static_cast<int>(rect.x), static_cast<int>(rect.y),
+              static_cast<int>(rect.width), static_cast<int>(rect.height),
+              border);
+  }
 }
 
 } // namespace
@@ -330,7 +405,8 @@ Size intrinsicSize(const Wrapper::Node &node, int fontSize) {
 // ---------------------------------------------------------------------------
 
 void paint(Paint::Canvas &canvas, const Wrapper::Node &node,
-           const Layout::Rect &rect, int fontSize, bool focused) {
+           const Layout::Rect &rect, int fontSize, bool focused,
+           const std::map<std::string, std::string> &style) {
   ControlKind k = classify(node);
   if (k == ControlKind::NoControl || k == ControlKind::Hidden) {
     return;
@@ -349,6 +425,8 @@ void paint(Paint::Canvas &canvas, const Wrapper::Node &node,
 
   switch (k) {
   case ControlKind::Checkbox: {
+    // Custom-shaped (not a simple rounded rect): keeps its native rendering
+    // regardless of `style`, same as before.
     if (checked) {
       FillRect(canvas, x, y, w, h, kAccent);
       Checkmark(canvas, x, y, w, h, kWhite);
@@ -370,47 +448,61 @@ void paint(Paint::Canvas &canvas, const Wrapper::Node &node,
     break;
   }
   case ControlKind::Button: {
-    FillRect(canvas, x, y, w, h, disabled ? kDisabledBg : kButtonBg);
-    StrokeRect(canvas, x, y, w, h, kBorder);
+    Paint::Color bg = ResolveColor(style, "background-color", "background",
+                                   disabled ? kDisabledBg : kButtonBg);
+    Paint::Color border = ResolveColor(style, "border-color", "border", kBorder);
+    Paint::Color fg = ResolveColor(style, "color", "color",
+                                   disabled ? kDisabledText : kBlack);
+    PaintRoundedBox(canvas, rect, ResolveRadius(style, std::min(w, h)), bg,
+                    border);
     std::string label = displayText(node).text;
     int tw = Font::textWidth(label, fontSize);
     int tx = x + std::max(6, (w - tw) / 2);
     int ty = y + (h - lh) / 2;
-    Font::drawText(canvas, tx, ty, label, disabled ? kDisabledText : kBlack,
-                   fontSize);
+    Font::drawText(canvas, tx, ty, label, fg, fontSize);
     break;
   }
   case ControlKind::Select: {
-    FillRect(canvas, x, y, w, h, disabled ? kDisabledBg : kWhite);
-    StrokeRect(canvas, x, y, w, h, kBorder);
+    Paint::Color bg =
+        ResolveColor(style, "background-color", "background",
+                    disabled ? kDisabledBg : kWhite);
+    Paint::Color border = ResolveColor(style, "border-color", "border", kBorder);
+    Paint::Color fg = ResolveColor(style, "color", "color",
+                                   disabled ? kDisabledText : kBlack);
+    PaintRoundedBox(canvas, rect, ResolveRadius(style, std::min(w, h)), bg,
+                    border);
     std::string label = displayText(node).text;
     int ty = y + (h - lh) / 2;
-    Font::drawText(canvas, x + 6, ty, label, disabled ? kDisabledText : kBlack,
-                   fontSize);
+    Font::drawText(canvas, x + 6, ty, label, fg, fontSize);
     // Dropdown arrow on the right.
     int aw = 8, ah = 5;
-    DownTriangle(canvas, x + w - aw - 6, y + (h - ah) / 2, aw, ah, kBorder);
+    DownTriangle(canvas, x + w - aw - 6, y + (h - ah) / 2, aw, ah, border);
     break;
   }
   case ControlKind::Text:
   case ControlKind::Password:
   case ControlKind::Textarea:
   default: {
-    FillRect(canvas, x, y, w, h, disabled ? kDisabledBg : kWhite);
-    StrokeRect(canvas, x, y, w, h, focused ? kFocus : kBorder);
+    Paint::Color bg =
+        ResolveColor(style, "background-color", "background",
+                    disabled ? kDisabledBg : kWhite);
+    Paint::Color border = ResolveColor(style, "border-color", "border", kBorder);
+    Paint::Color fg = ResolveColor(style, "color", "color", kBlack);
+    PaintRoundedBox(canvas, rect, ResolveRadius(style, std::min(w, h)), bg,
+                    focused ? kFocus : border);
     if (focused) {
       // Second inset line to make the focus ring read clearly.
       StrokeRect(canvas, x + 1, y + 1, w - 2, h - 2, kFocus);
     }
     DisplayText dt = displayText(node);
     Paint::Color tcol =
-        disabled ? kDisabledText : (dt.placeholder ? kPlaceholder : kBlack);
+        disabled ? kDisabledText : (dt.placeholder ? kPlaceholder : fg);
     int ty = (k == ControlKind::Textarea) ? y + 4 : y + (h - lh) / 2;
     Font::drawText(canvas, x + 6, ty, dt.text, tcol, fontSize);
     if (focused && !disabled) {
       int caretX =
           x + 6 + (dt.placeholder ? 0 : Font::textWidth(dt.text, fontSize));
-      FillRect(canvas, caretX + 1, ty, 1, lh, kBlack);
+      FillRect(canvas, caretX + 1, ty, 1, lh, fg);
     }
     break;
   }

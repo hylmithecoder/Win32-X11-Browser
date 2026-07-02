@@ -231,6 +231,38 @@ int main() {
 
   std::cout << "\n=========================================================="
             << std::endl;
+  std::cout << "JSON.parse / JSON.stringify" << std::endl;
+  std::cout << "=========================================================="
+            << std::endl;
+
+  // 23. JSON.parse of an object with nested array/number/bool/null.
+  engine.execute(
+      "var obj = JSON.parse('{\"nama\":\"Hylmi\",\"semester\":5,"
+      "\"aktif\":true,\"nilai\":[90,80],\"catatan\":null}');");
+  Js::JsValue obj = engine.getGlobalEnv()->get("obj");
+  Check("JSON.parse: string field", obj.getProperty("nama").stringVal == "Hylmi");
+  Check("JSON.parse: number field", obj.getProperty("semester").numberVal == 5.0);
+  Check("JSON.parse: boolean field", obj.getProperty("aktif").boolVal == true);
+  Check("JSON.parse: array field length",
+        obj.getProperty("nilai").objVal &&
+            obj.getProperty("nilai").objVal->elements.size() == 2);
+  Check("JSON.parse: array element value",
+        obj.getProperty("nilai").objVal->elements[1].numberVal == 80.0);
+
+  // 24. JSON.stringify round-trips a plain object.
+  engine.execute("var s = JSON.stringify({a: 1, b: 'x', c: [1,2]});");
+  Js::JsValue s = engine.getGlobalEnv()->get("s");
+  Check("JSON.stringify produces parseable JSON",
+        s.type == Js::ValueType::String && !s.stringVal.empty());
+  engine.execute("var roundTrip = JSON.parse(s);");
+  Js::JsValue roundTrip = engine.getGlobalEnv()->get("roundTrip");
+  Check("JSON.stringify -> JSON.parse round-trip preserves values",
+        roundTrip.getProperty("a").numberVal == 1.0 &&
+            roundTrip.getProperty("b").stringVal == "x" &&
+            roundTrip.getProperty("c").objVal->elements.size() == 2);
+
+  std::cout << "\n=========================================================="
+            << std::endl;
   if (g_failures == 0) {
     std::cout << "All JavaScript tests passed." << std::endl;
   } else {

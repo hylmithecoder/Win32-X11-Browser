@@ -1,5 +1,7 @@
 #include "Variabel.hpp"
 #include "Debugger.hpp"
+#include "Net.hpp"
+#include "json.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -49,6 +51,136 @@ double toNum(const JsValue &v) {
 }
 
 namespace {
+
+// Convert a parsed nlohmann::json value into the equivalent JsValue (objects
+// -> Object with properties, arrays -> Object with isArray/elements, scalars
+// map 1:1). Used by JSON.parse and fetch()'s Response.json().
+JsValue JsonToJsValue(const nlohmann::json &j) {
+  if (j.is_object()) {
+    JsValue obj(ValueType::Object);
+    for (auto it = j.begin(); it != j.end(); ++it) {
+      obj.setProperty(it.key(), JsonToJsValue(it.value()));
+    }
+    return obj;
+  }
+  if (j.is_array()) {
+    JsValue arr(ValueType::Object);
+    arr.objVal->isArray = true;
+    for (const auto &item : j) {
+      arr.objVal->elements.push_back(JsonToJsValue(item));
+    }
+    return arr;
+  }
+  if (j.is_string()) {
+    return JsValue(j.get<std::string>());
+  }
+  if (j.is_boolean()) {
+    return JsValue(j.get<bool>());
+  }
+  if (j.is_number()) {
+    return JsValue(j.get<double>());
+  }
+  return JsValue(); // null -> undefined (this engine has no separate null)
+}
+
+// Convert a JsValue into an nlohmann::json value (the inverse of
+// JsonToJsValue). Used by JSON.stringify and fetch()'s request body
+// serialization. A callable JsValue (no serializable representation in JSON)
+// becomes `null`, matching real JSON.stringify's treatment of functions
+// inside arrays.
+nlohmann::json JsValueToJson(const JsValue &v) {
+  switch (v.type) {
+  case ValueType::Number:
+    return v.numberVal;
+  case ValueType::String:
+    return v.stringVal;
+  case ValueType::Boolean:
+    return v.boolVal;
+  case ValueType::Object: {
+    if (v.callback) {
+      return nullptr;
+    }
+    if (v.objVal && v.objVal->isArray) {
+      nlohmann::json arr = nlohmann::json::array();
+      for (const JsValue &item : v.objVal->elements) {
+        arr.push_back(JsValueToJson(item));
+      }
+      return arr;
+    }
+    nlohmann::json obj = nlohmann::json::object();
+    if (v.objVal) {
+      for (const auto &kv : v.objVal->properties) {
+        // Skip callable properties (methods) -- not serializable, and
+        // present on e.g. a fetch() Response object alongside real data.
+        if (!kv.second.callback) {
+          obj[kv.first] = JsValueToJson(kv.second);
+        }
+      }
+    }
+    return obj;
+  }
+  default:
+    return nullptr;
+  }
+}
+
+std::string ToUpperAscii(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+  return s;
+}
+
+// Parse the numeric status code out of a raw HTTP response's status line
+// ("HTTP/1.1 200 OK\r\n..."), or 0 if it cannot be parsed.
+int HttpStatusCode(const std::string &raw) {
+  size_t sp1 = raw.find(' ');
+  if (sp1 == std::string::npos) {
+    return 0;
+  }
+  size_t sp2 = raw.find_first_of(" \r\n", sp1 + 1);
+  if (sp2 == std::string::npos || sp2 <= sp1 + 1) {
+    return 0;
+  }
+  try {
+    return std::stoi(raw.substr(sp1 + 1, sp2 - sp1 - 1));
+  } catch (...) {
+    return 0;
+  }
+}
+
+// The Promise<Response> fetch() resolves with. .status/.ok are plain values;
+// .text()/.json() are themselves async (return a Promise) to match the real
+// fetch() API, even though the body is already fully in memory by the time
+// this is built -- so `await (await fetch(url)).json()` works the same way
+// it would in a real browser.
+JsValue makeFetchResponse(JsEngine *eng, int status, const std::string &body) {
+  JsValue res(ValueType::Object);
+  res.setProperty("status", JsValue(static_cast<double>(status)));
+  res.setProperty("ok", JsValue(status >= 200 && status < 300));
+  res.setProperty(
+      "text", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                  [body, eng](const std::vector<JsValue> &) {
+                    JsValue p = eng->makePromise();
+                    eng->resolvePromiseObj(p.objVal, JsValue(body));
+                    return p;
+                  })));
+  res.setProperty(
+      "json", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                  [body, eng](const std::vector<JsValue> &) {
+                    JsValue p = eng->makePromise();
+                    try {
+                      eng->resolvePromiseObj(
+                          p.objVal, JsonToJsValue(nlohmann::json::parse(body)));
+                    } catch (const nlohmann::json::parse_error &e) {
+                      eng->rejectPromiseObj(
+                          p.objVal, JsValue(std::string(
+                                        "invalid JSON in response: ") +
+                                        e.what()));
+                    }
+                    return p;
+                  })));
+  return res;
+}
 
 // Build a Date instance: a plain object carrying `epochMs` baked into each of
 // its bound getter/formatter methods at construction time (this engine has no
@@ -409,6 +541,97 @@ void JsEngine::initBuiltins() {
                    return JsValue(nowEpochMs());
                  })));
   m_globalEnv->set("Date", dateGlobal);
+
+  // ---- JSON -------------------------------------------------------------
+  JsValue jsonObj(ValueType::Object);
+  jsonObj.setProperty(
+      "parse", JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+                   [](const std::vector<JsValue> &a) -> JsValue {
+                     if (a.empty()) {
+                       return JsValue();
+                     }
+                     try {
+                       return JsonToJsValue(
+                           nlohmann::json::parse(a[0].toString()));
+                     } catch (const nlohmann::json::parse_error &) {
+                       return JsValue(); // invalid JSON -> undefined (this
+                                         // engine has no throw to raise
+                                         // SyntaxError with instead)
+                     }
+                   })));
+  jsonObj.setProperty(
+      "stringify",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [](const std::vector<JsValue> &a) -> JsValue {
+            if (a.empty()) {
+              return JsValue();
+            }
+            return JsValue(JsValueToJson(a[0]).dump());
+          })));
+  m_globalEnv->set("JSON", jsonObj);
+
+  // ---- fetch --------------------------------------------------------------
+  // A synchronous (blocking) HTTP request via Net::Get/Post/Put/Delete --
+  // this engine has no async I/O -- wrapped as a Promise<Response> so it
+  // still composes with async/await and .then() chains the way real fetch()
+  // does; since the underlying call has already completed by the time this
+  // returns, the promise it returns is always already settled.
+  m_globalEnv->set(
+      "fetch",
+      JsValue(std::function<JsValue(const std::vector<JsValue> &)>(
+          [this](const std::vector<JsValue> &a) -> JsValue {
+            JsValue promise = makePromise();
+            if (a.empty()) {
+              rejectPromiseObj(promise.objVal,
+                               JsValue(std::string("fetch: missing URL")));
+              return promise;
+            }
+            std::string url = a[0].toString();
+            std::string method = "GET";
+            std::string body;
+            std::string contentType = Net::kDefaultContentType;
+            if (a.size() > 1 && a[1].objVal) {
+              JsValue methodVal = a[1].getProperty("method");
+              if (methodVal.type == ValueType::String &&
+                  !methodVal.stringVal.empty()) {
+                method = ToUpperAscii(methodVal.stringVal);
+              }
+              JsValue bodyVal = a[1].getProperty("body");
+              if (bodyVal.type == ValueType::String) {
+                body = bodyVal.stringVal;
+              }
+              JsValue headersVal = a[1].getProperty("headers");
+              if (headersVal.objVal) {
+                JsValue ct = headersVal.getProperty("Content-Type");
+                if (ct.type == ValueType::String && !ct.stringVal.empty()) {
+                  contentType = ct.stringVal;
+                }
+              }
+            }
+
+            std::string raw;
+            if (method == "POST") {
+              raw = Net::Post(url, body, contentType);
+            } else if (method == "PUT") {
+              raw = Net::Put(url, body, contentType);
+            } else if (method == "DELETE") {
+              raw = Net::Delete(url);
+            } else {
+              raw = Net::Get(url);
+            }
+
+            if (raw.empty()) {
+              rejectPromiseObj(
+                  promise.objVal,
+                  JsValue(std::string("fetch: network error requesting ") + url));
+              return promise;
+            }
+
+            resolvePromiseObj(promise.objVal,
+                              makeFetchResponse(this, HttpStatusCode(raw),
+                                                Net::ExtractBody(raw)));
+            return promise;
+          })));
 
   // ---- Promise --------------------------------------------------------
   JsValue promiseGlobal(std::function<JsValue(const std::vector<JsValue> &)>(

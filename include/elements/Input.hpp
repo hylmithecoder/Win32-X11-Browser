@@ -4,6 +4,7 @@
 #include "Font.hpp" // -> Paint.hpp -> Layout.hpp (Canvas, Color, Rect)
 #include "Wrapper.hpp"
 
+#include <map>
 #include <string>
 
 namespace DesktopWebview {
@@ -51,10 +52,19 @@ struct DisplayText {
 };
 DisplayText displayText(const Wrapper::Node &node);
 
-// Paint the native widget for `node` into content rect `rect`. `focused` draws
-// a focus ring (and a caret for text entry). No-op for None/Hidden controls.
+// Paint the widget for `node` into content rect `rect`. `focused` draws a
+// focus ring (and a caret for text entry). No-op for None/Hidden controls.
+//
+// `style` is the element's already-cascaded (and var()-resolved) CSS style
+// map -- the same one Layout::styleTree computed for it. Background/border
+// colour and border-radius are read from it when present (so a page's own
+// styling, or a ua.css default, wins exactly the same way it would for any
+// other box), falling back to this module's native widget look otherwise.
+// Checkbox/Radio are custom-shaped (not simple rounded rects) and keep their
+// existing native rendering regardless of `style`.
 void paint(Paint::Canvas &canvas, const Wrapper::Node &node,
-           const Layout::Rect &rect, int fontSize, bool focused);
+           const Layout::Rect &rect, int fontSize, bool focused,
+           const std::map<std::string, std::string> &style);
 
 // ---- Interaction (mutate the DOM; caller re-styles/relayouts afterwards) ----
 
